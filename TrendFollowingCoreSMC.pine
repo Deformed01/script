@@ -1,0 +1,720 @@
+//@version=5
+indicator("Trend-Following Core with Smart Money Concepts", overlay=true)
+
+// User Inputs
+ema_short_len = input.int(21, title="EMA Short Length (H4)")
+ema_long_len = input.int(50, title="EMA Long Length (H4)")
+use_daily_ema = input.bool(true, title="Use Daily EMA Filter")
+daily_ema_len = input.int(50, title="Daily EMA Length")
+fib_oez_min = input.float(0.5, title="Fib OEZ Min Level")
+fib_oez_max = input.float(0.786, title="Fib OEZ Max Level")
+atr_period = input.int(14, title="ATR Period")
+atr_multiplier_sl = input.float(1.5, title="ATR SL Multiplier")
+rrr_tp1 = input.float(2.0, title="RRR for TP1")
+rrr_tp2 = input.float(3.0, title="RRR for TP2")
+use_volume_confirmation = input.bool(true, title="Use Volume Confirmation")
+use_rsi_filter = input.bool(true, title="Use RSI Filter")
+rsi_period = input.int(14, title="RSI Period")
+rsi_ob_level = input.int(70, title="RSI Overbought Level")
+rsi_os_level = input.int(30, title="RSI Oversold Level")
+show_info_panel = input.bool(true, title="Show Info Panel")
+
+// --- EMA Calculations ---
+ema_short = ta.ema(close, ema_short_len)
+ema_long = ta.ema(close, ema_long_len)
+
+// Daily EMA Calculation
+daily_ema_value = float(na)
+if use_daily_ema
+    daily_close = request.security(syminfo.tickerid, "D", close[barstate.isrealtime ? 1 : 0], lookahead=barmerge.lookahead_on) // Adjusted for repainting
+    daily_ema_value := ta.ema(daily_close, daily_ema_len)
+
+// --- Plot EMAs ---
+plot(ema_short, title="Short EMA (H4)", color=color.new(color.blue, 0), linewidth=2)
+plot(ema_long, title="Long EMA (H4)", color=color.new(color.orange, 0), linewidth=2)
+
+if use_daily_ema
+    plot(daily_ema_value, title="Daily EMA", color=color.new(color.red, 0), linewidth=2, style=plot.style_dashed)
+
+// --- Trend Determination ---
+h4_trend_str = ema_short > ema_long ? "Up" : ema_short < ema_long ? "Down" : "Ranging"
+daily_trend_str = na
+if use_daily_ema
+    daily_trend_str := close > daily_ema_value ? "Up" : close < daily_ema_value ? "Down" : "Neutral"
+
+// Boolean trend conditions
+h4_uptrend = ema_short > ema_long
+h4_downtrend = ema_short < ema_long
+
+daily_uptrend = use_daily_ema ? (close > daily_ema_value) : true
+daily_downtrend = use_daily_ema ? (close < daily_ema_value) : true
+
+// --- Swing High/Low Identification and Fibonacci ---
+pivot_left_bars = input.int(10, title="Pivot Left Bars")
+pivot_right_bars = input.int(10, title="Pivot Right Bars")
+
+var float last_swing_high_price = na
+var float last_swing_low_price = na
+var int last_swing_high_bar = na
+var int last_swing_low_bar = na
+
+// Detect current pivots
+current_pivot_high = ta.pivothigh(high, pivot_left_bars, pivot_right_bars)
+current_pivot_low = ta.pivotlow(low, pivot_left_bars, pivot_right_bars)
+
+// Update swing points based on trend and new pivots
+if h4_uptrend
+    if not na(current_pivot_low)
+        last_swing_low_price := current_pivot_low
+        last_swing_low_bar := bar_index - pivot_right_bars
+    if not na(current_pivot_high) and (na(last_swing_high_price) or current_pivot_high > last_swing_high_price)
+        last_swing_high_price := current_pivot_high
+        last_swing_high_bar := bar_index - pivot_right_bars
+        // Reset low if high is newer and higher, ensuring Fib is drawn from a relevant low
+        if bar_index - pivot_right_bars > last_swing_low_bar and current_pivot_high > last_swing_high_price
+            last_swing_low_price := ta.lowest(low, bar_index - last_swing_high_bar) // Search for lowest low since last valid high
+            last_swing_low_bar := bar_index - ta.lowestbars(low, bar_index - last_swing_high_bar)
+
+
+if h4_downtrend
+    if not na(current_pivot_high)
+        last_swing_high_price := current_pivot_high
+        last_swing_high_bar := bar_index - pivot_right_bars
+    if not na(current_pivot_low) and (na(last_swing_low_price) or current_pivot_low < last_swing_low_price)
+        last_swing_low_price := current_pivot_low
+        last_swing_low_bar := bar_index - pivot_right_bars
+         // Reset high if low is newer and lower
+        if bar_index - pivot_right_bars > last_swing_high_bar and current_pivot_low < last_swing_low_price
+            last_swing_high_price := ta.highest(high, bar_index - last_swing_low_bar) // Search for highest high since last valid low
+            last_swing_high_bar := bar_index - ta.highestbars(high, bar_index - last_swing_low_bar)
+
+
+// Fibonacci OEZ Calculation and Plotting
+fib_level_1_price = float(na)
+fib_level_2_price = float(na)
+fib_start_price = float(na)
+fib_end_price = float(na)
+fib_start_bar = int(na)
+
+plot_oez = false
+
+if h4_uptrend and not na(last_swing_high_price) and not na(last_swing_low_price) and last_swing_high_bar > last_swing_low_bar
+    fib_start_price := last_swing_low_price
+    fib_end_price := last_swing_high_price
+    fib_start_bar := last_swing_low_bar
+    swing_range = fib_end_price - fib_start_price
+    fib_level_1_price := fib_end_price - (swing_range * fib_oez_min)
+    fib_level_2_price := fib_end_price - (swing_range * fib_oez_max)
+    if close > fib_level_2_price // Only plot if price is above the OEZ top
+        plot_oez := true
+    // Ensure OEZ is for pullbacks, not for when price is already below it
+    if low < fib_level_2_price
+        plot_oez := false
+
+
+if h4_downtrend and not na(last_swing_high_price) and not na(last_swing_low_price) and last_swing_low_bar > last_swing_high_bar
+    fib_start_price := last_swing_high_price
+    fib_end_price := last_swing_low_price
+    fib_start_bar := last_swing_high_bar
+    swing_range = fib_start_price - fib_end_price
+    fib_level_1_price := fib_start_price - (swing_range * fib_oez_min)
+    fib_level_2_price := fib_start_price - (swing_range * fib_oez_max)
+    if close < fib_level_2_price // Only plot if price is below the OEZ top (which is fib_oez_max for downtrend)
+        plot_oez := true
+    // Ensure OEZ is for pullbacks, not for when price is already above it
+    if high > fib_level_2_price
+        plot_oez := false
+
+
+var box oez_box = na
+if plot_oez and not na(fib_level_1_price) and not na(fib_level_2_price) and not na(fib_start_bar)
+    oez_color = h4_uptrend ? color.new(color.green, 80) : color.new(color.red, 80)
+    box.delete(oez_box) // Delete previous box
+    oez_box := box.new(left=fib_start_bar, top=fib_level_1_price,
+                       right=bar_index + 50, bottom=fib_level_2_price, // Extend 50 bars into the future
+                       border_color=na, bgcolor=oez_color,
+                       text=h4_uptrend ? "Long OEZ" : "Short OEZ", text_halign=text.align_center, text_valign=text.align_middle, text_size=size.small)
+
+// Reset swing points if trend changes to ensure fresh Fib levels
+if (h4_uptrend and h4_uptrend[1] == false) or (h4_downtrend and h4_downtrend[1] == false)
+    last_swing_high_price := na
+    last_swing_low_price := na
+    last_swing_high_bar := na
+    last_swing_low_bar := na
+    box.delete(oez_box)
+
+// --- Order Block (OB) Detection ---
+ob_lookback_period = input.int(50, title="OB Detection Lookback Period")
+max_ob_count = input.int(2, title="Max Unmitigated OBs to Display") // Max 2 Bullish, 2 Bearish
+
+// Arrays to store OBs: [high, low, bar_index_start, type (1=bullish, -1=bearish), mitigated_bar_index (na if unmitigated)]
+var array_bullish_ob = array.new_float(0, 5) // Each OB has 5 elements
+var array_bearish_ob = array.new_float(0, 5)
+var array_bullish_ob_boxes = array.new_box(0)
+var array_bearish_ob_boxes = array.new_box(0)
+
+// Helper function to add OB to array and manage size
+add_ob_to_array(arr, high_val, low_val, bar_val, type_val) =>
+    // Check for duplicates or overlapping OBs (simple check based on start bar)
+    is_duplicate = false
+    for i = 0 to array.size(arr) / 5 - 1
+        if array.get(arr, i * 5 + 2) == bar_val
+            is_duplicate := true
+            break
+    if not is_duplicate
+        array.unshift(arr, type_val) // type
+        array.unshift(arr, bar_val)  // bar_index_start
+        array.unshift(arr, low_val)  // low
+        array.unshift(arr, high_val) // high
+        array.unshift(arr, na)       // mitigated_bar_index (initially na)
+        // Keep only the N most recent OBs
+        if array.size(arr) > max_ob_count * 5
+            for i = 0 to 4 // Remove the 5 elements of the oldest OB
+                array.pop(arr)
+
+// Helper function to update mitigation status and remove old boxes
+check_and_plot_obs(ob_array, box_array, is_bullish_type) =>
+    new_box_array = array.new_box(0)
+    boxes_to_plot_this_bar = 0 // Max 1 new box per type per bar to avoid clutter
+
+    for i = 0 to array.size(ob_array) / 5 - 1
+        ob_high = array.get(ob_array, i * 5 + 1)
+        ob_low = array.get(ob_array, i * 5 + 2)
+        ob_start_bar = int(array.get(ob_array, i * 5 + 3))
+        ob_type = int(array.get(ob_array, i * 5 + 4)) // This is the type, index 0 is mitigation
+        ob_mitigated_at = array.get(ob_array, i * 5 + 0)
+
+        is_mitigated = not na(ob_mitigated_at)
+
+        // Check for mitigation
+        if not is_mitigated
+            if is_bullish_type and low <= ob_high // Price touched/entered the bullish OB zone from above
+                if low <= ob_low // Price traded through the bullish OB low
+                    array.set(ob_array, i * 5 + 0, bar_index) // Mark as mitigated
+                    is_mitigated := true
+            else if not is_bullish_type and high >= ob_low // Price touched/entered the bearish OB zone from below
+                if high >= ob_high // Price traded through the bearish OB high
+                    array.set(ob_array, i * 5 + 0, bar_index) // Mark as mitigated
+                    is_mitigated := true
+        
+        // Plotting unmitigated OBs
+        if not is_mitigated and ob_start_bar < bar_index and boxes_to_plot_this_bar < max_ob_count
+            box_color = is_bullish_type ? color.new(color.green, 75) : color.new(color.red, 75)
+            box_text = is_bullish_type ? "Bullish OB" : "Bearish OB"
+            
+            // Check if a box for this OB already exists (by start bar)
+            existing_box_found = false
+            for b_idx = 0 to array.size(box_array) - 1
+                if box.get_left(array.get(box_array, b_idx)) == ob_start_bar
+                    existing_box_found := true
+                    // Potentially update right extent if needed, but for now, just keep it
+                    array.push(new_box_array, array.get(box_array, b_idx)) 
+                    break
+            
+            if not existing_box_found
+                new_ob_box = box.new(left=ob_start_bar, top=ob_high, right=bar_index + ob_lookback_period, bottom=ob_low,
+                                 border_color=na, bgcolor=box_color,
+                                 text=box_text, text_halign=text.align_center, text_valign=text.align_top, text_size=size.tiny)
+                array.push(new_box_array, new_ob_box)
+            
+            boxes_to_plot_this_bar +=1
+
+    // Delete old boxes that are no longer in new_box_array (either mitigated or too old)
+    for b_idx = 0 to array.size(box_array) - 1
+        current_box = array.get(box_array, b_idx)
+        should_delete = true
+        for nb_idx = 0 to array.size(new_box_array) -1
+            if box.get_left(array.get(new_box_array, nb_idx)) == box.get_left(current_box) and box.get_top(array.get(new_box_array, nb_idx)) == box.get_top(current_box)
+                should_delete := false
+                break
+        if should_delete
+            box.delete(current_box)
+            
+    ob_array // return potentially modified array (mitigation status)
+    new_box_array // return new set of boxes
+
+
+// OB Detection Logic (runs on each bar)
+if barstate.isconfirmed // Only run on closed candles
+    // Bullish OB Detection: Last down candle before strong up move
+    // Look for a down candle (close[1] < open[1]) followed by a strong up candle (close[0] > open[0])
+    // The strong up candle should ideally break the high of the down candle decisively.
+    if close[1] < open[1] and close > open and (close > high[1]) // Potential bullish OB on candle [1]
+        // Basic BOS check: did the impulsive move (current bar) break the last swing high that was formed BEFORE the OB candle?
+        // This is a simplified BOS check. A more robust one would track multiple swing points.
+        bos_confirmed = false
+        if not na(last_swing_high_price) and last_swing_high_bar < bar_index -1 // Ensure swing high is prior to OB
+            if high > last_swing_high_price // Current high broke the last swing high
+                bos_confirmed := true
+        
+        // Condition for "strong" move - current candle closes significantly above OB candle's high
+        // Or if BOS is confirmed, consider it strong enough
+        is_strong_bullish_move = (close > high[1] + 0.5 * ta.atr(atr_period)) or bos_confirmed
+
+        if is_strong_bullish_move
+            ob_high_price = high[1]
+            ob_low_price = low[1]
+            // Check if this OB overlaps significantly with existing bullish OBs to avoid too many similar ones
+            is_overlapping = false
+            for i = 0 to array.size(array_bullish_ob) / 5 - 1
+                ex_ob_high = array.get(array_bullish_ob, i*5+1)
+                ex_ob_low = array.get(array_bullish_ob, i*5+2)
+                if not na(array.get(array_bullish_ob, i*5+0)) // if mitigated skip
+                    continue
+                // Overlap if new OB is within existing OB range or vice-versa
+                if (ob_low_price <= ex_ob_high and ob_high_price >= ex_ob_low)
+                    is_overlapping := true
+                    break
+            if not is_overlapping
+                 add_ob_to_array(array_bullish_ob, ob_high_price, ob_low_price, bar_index[1], 1)
+
+
+    // Bearish OB Detection: Last up candle before strong down move
+    if close[1] > open[1] and close < open and (close < low[1]) // Potential bearish OB on candle [1]
+        bos_confirmed = false
+        if not na(last_swing_low_price) and last_swing_low_bar < bar_index -1 // Ensure swing low is prior to OB
+            if low < last_swing_low_price // Current low broke the last swing low
+                bos_confirmed := true
+
+        is_strong_bearish_move = (close < low[1] - 0.5 * ta.atr(atr_period)) or bos_confirmed
+
+        if is_strong_bearish_move
+            ob_high_price = high[1]
+            ob_low_price = low[1]
+            is_overlapping = false
+            for i = 0 to array.size(array_bearish_ob) / 5 - 1
+                ex_ob_high = array.get(array_bearish_ob, i*5+1)
+                ex_ob_low = array.get(array_bearish_ob, i*5+2)
+                if not na(array.get(array_bearish_ob, i*5+0)) // if mitigated skip
+                    continue
+                if (ob_low_price <= ex_ob_high and ob_high_price >= ex_ob_low)
+                    is_overlapping := true
+                    break
+            if not is_overlapping
+                add_ob_to_array(array_bearish_ob, ob_high_price, ob_low_price, bar_index[1], -1)
+
+
+// Update mitigation and plot OBs
+array_bullish_ob := check_and_plot_obs(array_bullish_ob, array_bullish_ob_boxes, true)
+array_bearish_ob := check_and_plot_obs(array_bearish_ob, array_bearish_ob_boxes, false)
+array_bullish_ob_boxes := array.filter(array_bullish_ob_boxes, b => box.get_id(b) != "") // Keep valid boxes
+array_bearish_ob_boxes := array.filter(array_bearish_ob_boxes, b => box.get_id(b) != "") // Keep valid boxes
+
+// Clean up very old OBs from the arrays (e.g., older than lookback * 2) to prevent array from growing too large over time
+if bar_index % 100 == 0 // Run cleanup periodically
+    cutoff_bar_bullish = bar_index - ob_lookback_period * 2
+    for i = array.size(array_bullish_ob) / 5 - 1 to 0
+        if array.get(array_bullish_ob, i * 5 + 3) < cutoff_bar_bullish // ob_start_bar too old
+            array.remove(array_bullish_ob, i*5, (i*5)+4) // Remove all 5 elements for this OB
+            
+    cutoff_bar_bearish = bar_index - ob_lookback_period * 2
+    for i = array.size(array_bearish_ob) / 5 - 1 to 0
+        if array.get(array_bearish_ob, i * 5 + 3) < cutoff_bar_bearish
+            array.remove(array_bearish_ob, i*5, (i*5)+4)
+
+// --- Fair Value Gap (FVG) / Imbalance Detection ---
+fvg_lookback_period = input.int(50, title="FVG Detection Lookback Period")
+max_fvg_count = input.int(3, title="Max Unmitigated FVGs to Display") // Max 3 Bullish, 3 Bearish
+
+// Arrays to store FVGs: [top, bottom, bar_index_middle_candle, type (1=bullish, -1=bearish), mitigated_bar_index (na if unmitigated)]
+var array_bullish_fvg = array.new_float(0, 5)
+var array_bearish_fvg = array.new_float(0, 5)
+var array_bullish_fvg_boxes = array.new_box(0)
+var array_bearish_fvg_boxes = array.new_box(0)
+
+// Helper function to add FVG to array and manage size
+add_fvg_to_array(arr, top_val, bottom_val, bar_val, type_val) =>
+    is_duplicate = false
+    for i = 0 to array.size(arr) / 5 - 1
+        if array.get(arr, i * 5 + 2) == bar_val and array.get(arr, i*5+1) == bottom_val and array.get(arr,i*5) == top_val
+            is_duplicate := true
+            break
+    if not is_duplicate
+        array.unshift(arr, type_val) // type
+        array.unshift(arr, bar_val)  // bar_index_middle_candle
+        array.unshift(arr, bottom_val)
+        array.unshift(arr, top_val)
+        array.unshift(arr, na)       // mitigated_bar_index (initially na)
+        if array.size(arr) > max_fvg_count * 5
+            for i = 0 to 4
+                array.pop(arr)
+
+// Helper function to update FVG mitigation status and manage boxes
+check_and_plot_fvgs(fvg_array, box_array, is_bullish_fvg) =>
+    new_box_array = array.new_box(0)
+    boxes_plotted_this_bar = 0
+
+    for i = 0 to array.size(fvg_array) / 5 - 1
+        fvg_top = array.get(fvg_array, i * 5 + 1)
+        fvg_bottom = array.get(fvg_array, i * 5 + 2)
+        fvg_middle_bar = int(array.get(fvg_array, i * 5 + 3))
+        // fvg_type = int(array.get(fvg_array, i * 5 + 4)) // index 0 is mitigation status
+        fvg_mitigated_at = array.get(fvg_array, i * 5 + 0)
+
+        is_mitigated = not na(fvg_mitigated_at)
+
+        // Check for mitigation: FVG is mitigated if price touches it.
+        if not is_mitigated
+            if is_bullish_fvg and low <= fvg_top // Price touches or enters the Bullish FVG from above
+                array.set(fvg_array, i * 5 + 0, bar_index)
+                is_mitigated := true
+            else if not is_bullish_fvg and high >= fvg_bottom // Price touches or enters the Bearish FVG from below
+                array.set(fvg_array, i * 5 + 0, bar_index)
+                is_mitigated := true
+        
+        // Plotting unmitigated FVGs
+        if not is_mitigated and fvg_middle_bar < bar_index and boxes_plotted_this_bar < max_fvg_count
+            box_color = is_bullish_fvg ? color.new(color.aqua, 85) : color.new(color.purple, 85)
+            box_text = is_bullish_fvg ? "Bullish FVG" : "Bearish FVG"
+            
+            existing_box_found = false
+            for b_idx = 0 to array.size(box_array) - 1
+                if box.get_left(array.get(box_array, b_idx)) == fvg_middle_bar // Check by middle bar index
+                    existing_box_found := true
+                    array.push(new_box_array, array.get(box_array, b_idx))
+                    break
+            
+            if not existing_box_found
+                // FVG box starts from the bar AFTER the 3-candle pattern (i.e., fvg_middle_bar + 1)
+                // and extends. The FVG itself exists on fvg_middle_bar.
+                new_fvg_box = box.new(left=fvg_middle_bar, top=fvg_top, right=bar_index + fvg_lookback_period, bottom=fvg_bottom,
+                                     border_color=na, bgcolor=box_color,
+                                     text=box_text, text_halign=text.align_right, text_valign=text.align_middle, text_size=size.tiny)
+                array.push(new_box_array, new_fvg_box)
+
+            boxes_plotted_this_bar += 1
+            
+    // Delete old boxes for mitigated or outdated FVGs
+    for b_idx = 0 to array.size(box_array) - 1
+        current_box = array.get(box_array, b_idx)
+        should_delete = true
+        for nb_idx = 0 to array.size(new_box_array) -1
+            if box.get_left(array.get(new_box_array, nb_idx)) == box.get_left(current_box) and box.get_top(array.get(new_box_array, nb_idx)) == box.get_top(current_box)
+                should_delete := false
+                break
+        if should_delete
+            box.delete(current_box)
+
+    fvg_array
+    new_box_array
+
+
+// FVG Detection Logic (runs on each bar, looking at bar[1] as the middle candle of a 3-bar pattern)
+if barstate.isconfirmed // Ensure calculations are on closed candles
+    // Bullish FVG: low[2] > high[0]. FVG is space between high[0] and low[2], on candle[1].
+    // Here, [0] is current, [1] is previous, [2] is two bars ago.
+    // So, for an FVG formed by candles (i-2, i-1, i), where i is current bar:
+    // FVG is between low of (i-2) and high of (i). Middle candle is (i-1).
+    // We are looking at pattern: bar[2], bar[1], bar[0]
+    if low[2] > high[0]
+        // Middle candle bar[1] should ideally be strong (large body)
+        is_strong_middle_candle = (high[1] - low[1]) > ta.atr(atr_period) * 0.7 // Example: body > 70% of ATR
+        if is_strong_middle_candle
+            fvg_top_price = low[2]
+            fvg_bottom_price = high[0]
+            // Check for overlap with existing bullish FVGs
+            is_overlapping = false
+            for i = 0 to array.size(array_bullish_fvg) / 5 - 1
+                ex_fvg_top = array.get(array_bullish_fvg, i*5+1)
+                ex_fvg_bottom = array.get(array_bullish_fvg, i*5+2)
+                if not na(array.get(array_bullish_fvg, i*5+0)) // if mitigated skip
+                    continue
+                if (fvg_bottom_price <= ex_fvg_top and fvg_top_price >= ex_fvg_bottom)
+                    is_overlapping := true
+                    break
+            if not is_overlapping
+                add_fvg_to_array(array_bullish_fvg, fvg_top_price, fvg_bottom_price, bar_index[1], 1)
+
+
+    // Bearish FVG: high[2] < low[0]. FVG is space between low[0] and high[2], on candle[1].
+    if high[2] < low[0]
+        is_strong_middle_candle = (high[1] - low[1]) > ta.atr(atr_period) * 0.7
+        if is_strong_middle_candle
+            fvg_top_price = high[2]    // For bearish FVG, top is the high of candle[2]
+            fvg_bottom_price = low[0]  // Bottom is the low of candle[0]
+            is_overlapping = false
+            for i = 0 to array.size(array_bearish_fvg) / 5 - 1
+                ex_fvg_top = array.get(array_bearish_fvg, i*5+1)
+                ex_fvg_bottom = array.get(array_bearish_fvg, i*5+2)
+                if not na(array.get(array_bearish_fvg, i*5+0)) // if mitigated skip
+                    continue
+                if (fvg_bottom_price <= ex_fvg_top and fvg_top_price >= ex_fvg_bottom)
+                    is_overlapping := true
+                    break
+            if not is_overlapping
+                add_fvg_to_array(array_bearish_fvg, fvg_top_price, fvg_bottom_price, bar_index[1], -1)
+
+
+// Update mitigation and plot FVGs
+array_bullish_fvg := check_and_plot_fvgs(array_bullish_fvg, array_bullish_fvg_boxes, true)
+array_bearish_fvg := check_and_plot_fvgs(array_bearish_fvg, array_bearish_fvg_boxes, false)
+array_bullish_fvg_boxes := array.filter(array_bullish_fvg_boxes, b => box.get_id(b) != "")
+array_bearish_fvg_boxes := array.filter(array_bearish_fvg_boxes, b => box.get_id(b) != "")
+
+// Clean up very old FVGs from the arrays
+if bar_index % 100 == 0 // Run cleanup periodically
+    cutoff_bar_fvg = bar_index - fvg_lookback_period * 2
+    for i = array.size(array_bullish_fvg) / 5 - 1 to 0
+        if array.get(array_bullish_fvg, i * 5 + 3) < cutoff_bar_fvg // fvg_middle_bar too old
+            array.remove(array_bullish_fvg, i*5, (i*5)+4)
+            
+    for i = array.size(array_bearish_fvg) / 5 - 1 to 0
+        if array.get(array_bearish_fvg, i * 5 + 3) < cutoff_bar_fvg
+            array.remove(array_bearish_fvg, i*5, (i*5)+4)
+
+// --- RSI Calculation ---
+rsi_value = ta.rsi(close, rsi_period)
+// rsi_ob_level and rsi_os_level are already defined in inputs
+
+// --- Volume Data and Confirmation ---
+volume_sma_len = input.int(20, title="Volume SMA Length for Spike Detection")
+volume_spike_multiplier = input.float(1.5, title="Volume Spike Multiplier")
+
+is_volume_spike = false
+if use_volume_confirmation
+    avg_volume = ta.sma(volume, volume_sma_len)
+    is_volume_spike := volume > avg_volume * volume_spike_multiplier
+else
+    is_volume_spike := true // Default to true if volume confirmation is not used
+
+// --- Entry Logic and Signal Generation ---
+var bool long_signal = false
+var bool short_signal = false
+var bool in_long_trade_zone = false  // To track if price is in a valid long setup zone (OEZ + OB/FVG)
+var bool in_short_trade_zone = false // To track if price is in a valid short setup zone
+
+// Reset signals at the start of each bar
+long_signal := false
+short_signal := false
+// Reset trade zone flags - they will be set if conditions are met on the current bar
+in_long_trade_zone := false
+in_short_trade_zone := false
+
+// --- Parameters for Entry Logic ---
+min_candle_body_atr_mult = input.float(0.5, title="Min Candle Body ATR Multiplier for Confirmation")
+ob_fvg_confluence_tolerance_atr = input.float(0.1, title="OB/FVG Confluence Tolerance (ATR based)") // e.g. 0.1 * ATR
+
+// --- Helper function to check OB/FVG confluence with OEZ ---
+// Type: 1 for Bullish, -1 for Bearish
+check_smc_confluence(type, oez_top, oez_bottom) =>
+    confluence_found = false
+    tolerance = ta.atr(atr_period) * ob_fvg_confluence_tolerance_atr
+
+    if type == 1 // Bullish
+        // Check Bullish OBs
+        for i = 0 to array.size(array_bullish_ob) / 5 - 1
+            ob_mitigated_at = array.get(array_bullish_ob, i * 5 + 0)
+            if na(ob_mitigated_at) // Unmitigated
+                ob_high = array.get(array_bullish_ob, i * 5 + 1)
+                ob_low = array.get(array_bullish_ob, i * 5 + 2)
+                // Check for overlap or proximity: OB is within OEZ +- tolerance
+                if (math.max(ob_low, oez_bottom - tolerance) < math.min(ob_high, oez_top + tolerance))
+                    confluence_found := true
+                    break
+        if confluence_found
+            true
+        else
+            // Check Bullish FVGs
+            for i = 0 to array.size(array_bullish_fvg) / 5 - 1
+                fvg_mitigated_at = array.get(array_bullish_fvg, i * 5 + 0)
+                if na(fvg_mitigated_at) // Unmitigated
+                    fvg_top = array.get(array_bullish_fvg, i * 5 + 1)    // Actual top of FVG
+                    fvg_bottom = array.get(array_bullish_fvg, i * 5 + 2) // Actual bottom of FVG
+                     // Check for overlap or proximity: FVG is within OEZ +- tolerance
+                    if (math.max(fvg_bottom, oez_bottom - tolerance) < math.min(fvg_top, oez_top + tolerance))
+                        confluence_found := true
+                        break
+            confluence_found
+
+    else // Bearish (type == -1)
+        // Check Bearish OBs
+        for i = 0 to array.size(array_bearish_ob) / 5 - 1
+            ob_mitigated_at = array.get(array_bearish_ob, i * 5 + 0)
+            if na(ob_mitigated_at)
+                ob_high = array.get(array_bearish_ob, i * 5 + 1)
+                ob_low = array.get(array_bearish_ob, i * 5 + 2)
+                if (math.max(ob_low, oez_bottom - tolerance) < math.min(ob_high, oez_top + tolerance))
+                    confluence_found := true
+                    break
+        if confluence_found
+            true
+        else
+            // Check Bearish FVGs
+            for i = 0 to array.size(array_bearish_fvg) / 5 - 1
+                fvg_mitigated_at = array.get(array_bearish_fvg, i * 5 + 0)
+                if na(fvg_mitigated_at)
+                    fvg_top = array.get(array_bearish_fvg, i * 5 + 1)
+                    fvg_bottom = array.get(array_bearish_fvg, i * 5 + 2)
+                    if (math.max(fvg_bottom, oez_bottom - tolerance) < math.min(fvg_top, oez_top + tolerance))
+                        confluence_found := true
+                        break
+            confluence_found
+    confluence_found // Explicitly return
+
+
+// --- Main Entry Logic ---
+if barstate.isconfirmed // Process on closed candles
+    // --- Long Entry Conditions ---
+    if h4_uptrend and daily_uptrend and plot_oez // Trend alignment and OEZ is plotted (valid)
+        // Check if price is currently in the Bullish OEZ (fib_level_1_price is top, fib_level_2_price is bottom for uptrend)
+        price_in_bullish_oez = low <= fib_level_1_price and high >= fib_level_2_price
+
+        if price_in_bullish_oez
+            // Check for SMC confluence (Bullish OB or FVG) within or near the OEZ
+            // OEZ for long: fib_level_1_price (higher, e.g. 0.5), fib_level_2_price (lower, e.g. 0.786)
+            // So OEZ top is fib_level_1_price, OEZ bottom is fib_level_2_price
+            smc_confluence_long = check_smc_confluence(1, fib_level_1_price, fib_level_2_price)
+            if smc_confluence_long
+                in_long_trade_zone := true // Price is in OEZ with SMC confluence
+
+                // Candlestick Confirmation
+                is_bullish_candle = close > open and (high - low) > 0 and (close - open) / (high - low) >= 0.25 // Closes in top 75% of range
+                is_strong_bullish_candle = is_bullish_candle and (close - open) >= ta.atr(atr_period) * min_candle_body_atr_mult
+                
+                // RSI Filter
+                rsi_long_ok = use_rsi_filter ? (rsi_value < rsi_ob_level) : true
+                
+                // Volume Confirmation (is_volume_spike is already calculated)
+                volume_long_ok = use_volume_confirmation ? is_volume_spike : true
+
+                if is_strong_bullish_candle and rsi_long_ok and volume_long_ok
+                    long_signal := true
+                    // Potentially reset in_long_trade_zone here if one signal per zone crossing is desired
+                    // For now, it signals on every confirmed candle in the zone
+
+
+    // --- Short Entry Conditions ---
+    if h4_downtrend and daily_downtrend and plot_oez // Trend alignment and OEZ is plotted (valid)
+        // Check if price is currently in the Bearish OEZ (fib_level_1_price is bottom, fib_level_2_price is top for downtrend)
+        price_in_bearish_oez = high >= fib_level_1_price and low <= fib_level_2_price
+
+        if price_in_bearish_oez
+            // Check for SMC confluence (Bearish OB or FVG) within or near the OEZ
+            // OEZ for short: fib_level_1_price (lower, e.g. 0.5), fib_level_2_price (higher, e.g. 0.786)
+            // So OEZ top is fib_level_2_price, OEZ bottom is fib_level_1_price
+            smc_confluence_short = check_smc_confluence(-1, fib_level_2_price, fib_level_1_price)
+            if smc_confluence_short
+                in_short_trade_zone := true // Price is in OEZ with SMC confluence
+
+                // Candlestick Confirmation
+                is_bearish_candle = close < open and (high - low) > 0 and (open - close) / (high - low) >= 0.25 // Closes in bottom 75% of range
+                is_strong_bearish_candle = is_bearish_candle and (open - close) >= ta.atr(atr_period) * min_candle_body_atr_mult
+
+                // RSI Filter
+                rsi_short_ok = use_rsi_filter ? (rsi_value > rsi_os_level) : true
+
+                // Volume Confirmation
+                volume_short_ok = use_volume_confirmation ? is_volume_spike : true
+
+                if is_strong_bearish_candle and rsi_short_ok and volume_short_ok
+                    short_signal := true
+                    // Potentially reset in_short_trade_zone here
+
+// --- Plotting Signals ---
+plotshape(long_signal, title="Buy Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.labelup, text="BUY", textcolor=color.new(color.white,0), size=size.normal)
+plotshape(short_signal, title="Sell Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.labeldown, text="SELL", textcolor=color.new(color.white,0), size=size.normal)
+
+// --- Enhanced Info Panel ---
+var table info_panel = na // Initialize with na, create only if needed
+
+if show_info_panel and barstate.islast
+    if na(info_panel) // Create table only once
+        info_panel := table.new(position.top_right, 2, 6, border_width=1) // 2 columns, 6 rows
+
+    // Clear table before redrawing to avoid overlap on settings change
+    table.clear(info_panel, 0, 0, 1, 5)
+
+    // Row 0: H4 Trend
+    table.cell(info_panel, 0, 0, "H4 Trend:", text_halign=text.align_left, bgcolor=color.new(color.gray, 80))
+    table.cell(info_panel, 1, 0, h4_trend_str, text_halign=text.align_right, text_color=h4_uptrend ? color.green : h4_downtrend ? color.red : color.black)
+
+    // Row 1: Daily Trend Filter
+    daily_trend_display_str = "Inactive"
+    daily_trend_display_color = color.gray
+    if use_daily_ema
+        if daily_trend_str == "Up"
+            daily_trend_display_str := "Active - Up"
+            daily_trend_display_color := color.green
+        else if daily_trend_str == "Down"
+            daily_trend_display_str := "Active - Down"
+            daily_trend_display_color := color.red
+        else
+            daily_trend_display_str := "Active - Neutral"
+            daily_trend_display_color := color.black
+            
+    table.cell(info_panel, 0, 1, "Daily Trend:", text_halign=text.align_left, bgcolor=color.new(color.gray, 80))
+    table.cell(info_panel, 1, 1, daily_trend_display_str, text_halign=text.align_right, text_color=daily_trend_display_color)
+
+    // Row 2: Current ATR Value
+    table.cell(info_panel, 0, 2, "ATR (" + str.tostring(atr_period) + "):", text_halign=text.align_left, bgcolor=color.new(color.gray, 80))
+    table.cell(info_panel, 1, 2, str.tostring(current_atr, format.mintick), text_halign=text.align_right, text_color=color.black)
+
+    // Row 3: Current RSI Value
+    table.cell(info_panel, 0, 3, "RSI (" + str.tostring(rsi_period) + "):", text_halign=text.align_left, bgcolor=color.new(color.gray, 80))
+    table.cell(info_panel, 1, 3, str.tostring(rsi_value, "#.0#"), text_halign=text.align_right, text_color=color.black)
+    
+    // Row 4: RSI Status
+    rsi_status_str = rsi_value > rsi_ob_level ? "Overbought" : rsi_value < rsi_os_level ? "Oversold" : "Neutral"
+    rsi_status_color = rsi_value > rsi_ob_level ? color.red : rsi_value < rsi_os_level ? color.green : color.black
+    table.cell(info_panel, 0, 4, "RSI Status:", text_halign=text.align_left, bgcolor=color.new(color.gray, 80))
+    table.cell(info_panel, 1, 4, rsi_status_str, text_halign=text.align_right, text_color=rsi_status_color)
+
+    // Row 5: Last Signal (Optional - kept from previous version, can be removed if too cluttered)
+    last_signal_str = long_signal[1] ? "BUY (Prev)" : short_signal[1] ? "SELL (Prev)" : (long_signal ? "BUY (Active)" : short_signal ? "SELL (Active)" : "None")
+    last_signal_color = long_signal[1] or long_signal ? color.green : short_signal[1] or short_signal ? color.red : color.gray
+    table.cell(info_panel, 0, 5, "Last Signal:", text_halign=text.align_left, bgcolor=color.new(color.gray, 80))
+    table.cell(info_panel, 1, 5, last_signal_str, text_halign=text.align_right, text_color=last_signal_color)
+
+else if not na(info_panel) // If panel is disabled but table exists
+    table.delete(info_panel)
+    info_panel := na // Reset to na so it can be recreated if enabled again
+
+// --- ATR, Stop Loss (SL) and Take Profit (TP) Calculations ---
+current_atr = ta.atr(atr_period) // Ensure ATR is calculated
+
+var float entry_price_long = na
+var float sl_price_long = na
+var float tp1_price_long = na
+var float tp2_price_long = na
+
+var float entry_price_short = na
+var float sl_price_short = na
+var float tp1_price_short = na
+var float tp2_price_short = na
+
+if (long_signal)
+    entry_price_long := close // Entry price for long
+    sl_price_long := entry_price_long - (current_atr * atr_multiplier_sl)
+    risk_amount_long = entry_price_long - sl_price_long
+    tp1_price_long := entry_price_long + (risk_amount_long * rrr_tp1)
+    tp2_price_long := entry_price_long + (risk_amount_long * rrr_tp2)
+
+    // Reset short levels
+    entry_price_short := na
+    sl_price_short := na
+    tp1_price_short := na
+    tp2_price_short := na
+
+if (short_signal)
+    entry_price_short := close // Entry price for short
+    sl_price_short := entry_price_short + (current_atr * atr_multiplier_sl)
+    risk_amount_short = sl_price_short - entry_price_short
+    tp1_price_short := entry_price_short - (risk_amount_short * rrr_tp1)
+    tp2_price_short := entry_price_short - (risk_amount_short * rrr_tp2)
+
+    // Reset long levels
+    entry_price_long := na
+    sl_price_long := na
+    tp1_price_long := na
+    tp2_price_long := na
+
+// --- Plot SL/TP Levels ---
+// Long SL/TP Lines
+plot(sl_price_long, title="Long SL", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2, display=display.all)
+plot(tp1_price_long, title="Long TP1", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=1, display=display.all)
+plot(tp2_price_long, title="Long TP2", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2, display=display.all)
+
+// Short SL/TP Lines
+plot(sl_price_short, title="Short SL", color=color.new(color.maroon, 0), style=plot.style_linebr, linewidth=2, display=display.all) // Using maroon for short SL to differentiate
+plot(tp1_price_short, title="Short TP1", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=1, display=display.all) // Using lime for short TP1
+plot(tp2_price_short, title="Short TP2", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=2, display=display.all)
