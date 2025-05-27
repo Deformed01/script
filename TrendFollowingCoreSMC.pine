@@ -174,7 +174,7 @@ add_ob_to_array(arr, high_val, low_val, bar_val, type_val) =>
     arr // Explicitly return the modified array
 
 // Helper function to update mitigation status and remove old boxes
-check_and_plot_obs(ob_array, box_array, is_bullish_type) =>
+check_and_plot_obs(ob_array, box_array, is_bullish_type) 
     new_box_array = array.new_box(0)
     boxes_to_plot_this_bar = 0 // Max 1 new box per type per bar to avoid clutter
 
@@ -231,7 +231,7 @@ check_and_plot_obs(ob_array, box_array, is_bullish_type) =>
         if should_delete
             box.delete(current_box)
             
-    return [ob_array, new_box_array] // return new set of boxes
+    return (ob_array, new_box_array) // return new set of boxes
 
 
 // OB Detection Logic (runs on each bar)
@@ -326,7 +326,13 @@ var array_bearish_fvg_boxes = array.new_box(0)
 add_fvg_to_array(arr, top_val, bottom_val, bar_val, type_val) =>
     is_duplicate = false
     for i = 0 to array.size(arr) / 5 - 1
-        if array.get(arr, i * 5 + 2) == bar_val and array.get(arr, i*5+1) == bottom_val and array.get(arr,i*5) == top_val
+        // Corrected indices:
+        // Element 0: mitigation_status (na initially)
+        // Element 1: top_val
+        // Element 2: bottom_val
+        // Element 3: bar_val (middle_candle_index)
+        // Element 4: type_val
+        if array.get(arr, i * 5 + 3) == bar_val and array.get(arr, i * 5 + 1) == top_val and array.get(arr, i * 5 + 2) == bottom_val
             is_duplicate := true
             break
     if not is_duplicate
@@ -341,7 +347,7 @@ add_fvg_to_array(arr, top_val, bottom_val, bar_val, type_val) =>
     arr // Explicitly return the modified array
 
 // Helper function to update FVG mitigation status and manage boxes
-check_and_plot_fvgs(fvg_array, box_array, is_bullish_fvg) =>
+check_and_plot_fvgs(fvg_array, box_array, is_bullish_fvg) 
     new_box_array = array.new_box(0)
     boxes_plotted_this_bar = 0
 
@@ -396,7 +402,7 @@ check_and_plot_fvgs(fvg_array, box_array, is_bullish_fvg) =>
         if should_delete
             box.delete(current_box)
 
-    return [fvg_array, new_box_array]
+    return (fvg_array, new_box_array)
 
 
 // FVG Detection Logic (runs on each bar, looking at bar[1] as the middle candle of a 3-bar pattern)
