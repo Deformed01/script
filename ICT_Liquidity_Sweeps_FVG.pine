@@ -144,13 +144,14 @@ if barstate.isconfirmed // Ensure we operate on closed candles for FVG detection
                 new_bullish_ifvg = Gap.new(current_fvg.top, current_fvg.bottom, bar_index, true, true, na, bar_index) // IFVG forms on current bar
                 array.push(ifvg_array, new_bullish_ifvg)
                 // Manage ifvg_array size
+                // Manage ifvg_array size
                 if array.size(ifvg_array) > max_fvgs
                     Gap oldest_ifvg = array.shift(ifvg_array)
-                    if not na(oldest_ifvg.box_id) // Delete box of the oldest IFVG if it exists
+                    if not na(oldest_ifvg.box_id) 
                         box.delete(oldest_ifvg.box_id)
                 
                 // Remove the original FVG from fvg_array
-                if not na(current_fvg.box_id) // Delete box of the FVG that is being inverted
+                if not na(current_fvg.box_id) 
                     box.delete(current_fvg.box_id)
                 array.remove(fvg_array, i)
                 continue // Move to next FVG, as current_fvg is now removed
@@ -171,14 +172,14 @@ if barstate.isconfirmed // Ensure we operate on closed candles for FVG detection
                 // Manage ifvg_array size
                 if array.size(ifvg_array) > max_fvgs
                     Gap oldest_ifvg = array.shift(ifvg_array)
-                    if not na(oldest_ifvg.box_id) // Delete box of the oldest IFVG if it exists
+                    if not na(oldest_ifvg.box_id) 
                         box.delete(oldest_ifvg.box_id)
 
                 // Remove the original FVG from fvg_array
-                if not na(current_fvg.box_id) // Delete box of the FVG that is being inverted
+                if not na(current_fvg.box_id) 
                     box.delete(current_fvg.box_id)
                 array.remove(fvg_array, i)
-                // No continue needed here as it's the last check in the loop for this iteration (or add if more logic follows for current_fvg)
+                // No continue needed here as it's the last check in the loop for this iteration
 
 // --- Mitigation and Plotting Logic ---
 
@@ -194,11 +195,7 @@ if barstate.islast or barstate.isconfirmed // Process on confirmed bars, update 
                 is_mitigated_fvg := true
             else if not current_gap.is_bullish and low < current_gap.bottom and high > current_gap.top // Price traded through
                 is_mitigated_fvg := true
-            // Simpler mitigation: if price touches the far end.
-            // if current_gap.is_bullish and low < current_gap.bottom 
-            //     is_mitigated_fvg := true
-            // else if not current_gap.is_bullish and high > current_gap.top
-            //     is_mitigated_fvg := true
+            // Simpler mitigation block removed to avoid potential parser confusion.
             
             if is_mitigated_fvg
                 if not na(current_gap.box_id)
@@ -233,6 +230,7 @@ if barstate.islast or barstate.isconfirmed // Process on confirmed bars, update 
                 is_mitigated_ifvg := true
             else if not current_gap.is_bullish and low < current_gap.bottom and high > current_gap.top
                 is_mitigated_ifvg := true
+            // Simpler mitigation block for IFVGs was not present, so no change here.
             
             if is_mitigated_ifvg
                 if not na(current_gap.box_id)
