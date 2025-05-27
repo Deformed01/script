@@ -191,9 +191,10 @@ if barstate.islast or barstate.isconfirmed // Process on confirmed bars, update 
             bool is_mitigated_fvg = false
 
             // FVG Mitigation Check: Mitigated if price trades fully through it.
-            if current_gap.is_bullish and high > current_gap.top and low < current_gap.bottom // Price traded through
-                is_mitigated_fvg := true
-            else if not current_gap.is_bullish and low < current_gap.bottom and high > current_gap.top // Price traded through
+            condition_bullish_fvg_mitigation = current_gap.is_bullish and high > current_gap.top and low < current_gap.bottom
+            condition_bearish_fvg_mitigation = not current_gap.is_bullish and low < current_gap.bottom and high > current_gap.top
+            
+            if condition_bullish_fvg_mitigation or condition_bearish_fvg_mitigation
                 is_mitigated_fvg := true
             // Simpler mitigation block removed to avoid potential parser confusion.
             
@@ -226,9 +227,10 @@ if barstate.islast or barstate.isconfirmed // Process on confirmed bars, update 
             bool is_mitigated_ifvg = false
 
             // IFVG Mitigation Check (using same logic as FVG: price trades fully through it)
-            if current_gap.is_bullish and high > current_gap.top and low < current_gap.bottom 
-                is_mitigated_ifvg := true
-            else if not current_gap.is_bullish and low < current_gap.bottom and high > current_gap.top
+            condition_bullish_ifvg_mitigation = current_gap.is_bullish and high > current_gap.top and low < current_gap.bottom
+            condition_bearish_ifvg_mitigation = not current_gap.is_bullish and low < current_gap.bottom and high > current_gap.top
+
+            if condition_bullish_ifvg_mitigation or condition_bearish_ifvg_mitigation
                 is_mitigated_ifvg := true
             // Simpler mitigation block for IFVGs was not present, so no change here.
             
