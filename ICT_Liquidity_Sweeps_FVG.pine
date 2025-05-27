@@ -1,0 +1,281 @@
+//@version=5
+indicator("ICT Liquidity Sweeps & FVG/IFVG", overlay=true)
+
+// User Inputs
+swing_lookback = input.int(15, title="Swing Point Lookback", minval=1)
+fvg_lookback = input.int(50, title="FVG Detection Lookback", minval=1)
+show_fvg = input.bool(true, title="Show Fair Value Gaps (FVG)")
+show_ifvg = input.bool(true, title="Show Inversion FVGs (IFVG)")
+show_sweeps = input.bool(true, title="Show Liquidity Sweeps")
+box_extension = input.int(30, title="Box Extension Bars", minval=0)
+max_fvgs = input.int(5, title="Max FVGs/IFVGs to Display", minval=1)
+
+// --- Swing High/Low Identification ---
+var float last_swing_high_price = na
+var int last_swing_high_bar = na
+var float last_swing_low_price = na
+var int last_swing_low_bar = na
+
+// Detect pivot points
+// Using swing_lookback for both left and right bars for ta.pivot functions 
+// to identify more confirmed and significant swing points.
+// ta.pivothigh returns the price of the pivot `rightbars` ago if a pivot is found, otherwise na.
+// The `swing_lookback` variable here effectively serves as the `leftbars` argument in the traditional sense for ta.pivothigh/low,
+// and we use `swing_lookback` as the `rightbars` argument to confirm the pivot.
+// The actual function signature for ta.pivothigh is pivothigh(source, leftbars, rightbars)
+// So, source is high/low, leftbars is swing_lookback, rightbars is swing_lookback.
+
+pivot_high_value = ta.pivothigh(high, swing_lookback, swing_lookback) 
+pivot_low_value = ta.pivotlow(low, swing_lookback, swing_lookback)
+
+if not na(pivot_high_value)
+    last_swing_high_price := pivot_high_value
+    last_swing_high_bar := bar_index - swing_lookback // Pivot is identified swing_lookback bars to the right, so its actual location is bar_index - swing_lookback
+
+if not na(pivot_low_value)
+    last_swing_low_price := pivot_low_value
+    last_swing_low_bar := bar_index - swing_lookback // Pivot is identified swing_lookback bars to the right, so its actual location is bar_index - swing_lookback
+
+// --- Liquidity Sweep Detection ---
+is_bsl = false
+is_ssl = false
+
+// BSL (Buy-side Liquidity Sweep)
+if not na(last_swing_high_price) and (bar_index > last_swing_high_bar + 1)
+    if high > last_swing_high_price and close < last_swing_high_price
+        is_bsl := true
+
+// SSL (Sell-side Liquidity Sweep)
+if not na(last_swing_low_price) and (bar_index > last_swing_low_bar + 1)
+    if low < last_swing_low_price and close > last_swing_low_price
+        is_ssl := true
+
+// Plotting Sweeps
+if show_sweeps
+    if is_bsl
+        plotshape(is_bsl, title="BSL", text="BSL", location=location.abovebar, color=color.new(color.red, 0), style=shape.labeldown, size=size.tiny) 
+        plotchar(is_bsl ? high[0] : na, title="BSL Mark", char='✕', color=color.new(color.red,0), location=location.absolute, size=size.tiny) 
+        
+    if is_ssl
+        plotshape(is_ssl, title="SSL", text="SSL", location=location.belowbar, color=color.new(color.green, 0), style=shape.labelup, size=size.tiny)
+        plotchar(is_ssl ? low[0] : na, title="SSL Mark", char='✕', color=color.new(color.green,0), location=location.absolute, size=size.tiny)
+
+// --- Liquidity Sweep Alerts ---
+if barstate.isconfirmed // Ensure alerts trigger on confirmed bar data
+    if is_bsl
+        alert_bsl_message = "Buy-Side Liquidity Sweep (BSL) detected for " + syminfo.ticker + " at " + str.tostring(high)
+        alert(alert_bsl_message, freq = alert.freq_once_per_bar_close)
+    
+    if is_ssl
+        alert_ssl_message = "Sell-Side Liquidity Sweep (SSL) detected for " + syminfo.ticker + " at " + str.tostring(low)
+        alert(alert_ssl_message, freq = alert.freq_once_per_bar_close)
+
+// --- FVG and IFVG Array Management ---
+
+// Custom Type for Gaps (FVG/IFVG)
+type Gap
+    float top
+    float bottom
+    int start_bar     // Bar index where the FVG pattern completed (middle candle bar_index)
+    bool is_bullish   // true for bullish, false for bearish
+    bool is_ifvg      // true if it's an Inversion FVG
+    box box_id = na   // For plotting
+    int id            // Unique ID, e.g., bar_index when it formed or was identified
+
+var Gap[] fvg_array = array.new<Gap>()
+var Gap[] ifvg_array = array.new<Gap>()
+
+// Remove old single FVG/IFVG storage variables
+// var float last_bullish_fvg_top = na ... etc. - All these are now replaced by array management.
+// is_bullish_fvg and is_bearish_fvg flags are also effectively replaced by array checks or temporary flags if needed.
+
+if barstate.isconfirmed // Ensure we operate on closed candles for FVG detection
+    // --- Standard FVG Detection and Array Management ---
+    // Bullish FVG Detection: low of candle[2] > high of candle[0]
+    if low[2] > high[0]
+        bullish_fvg_top = low[2]
+        bullish_fvg_bottom = high[0]
+        bullish_fvg_start_bar = bar_index - 1 // FVG is defined by candle [1] (middle of 3)
+        
+        // Create new Gap object for Bullish FVG
+        new_bullish_fvg = Gap.new(bullish_fvg_top, bullish_fvg_bottom, bullish_fvg_start_bar, true, false, na, bar_index)
+        array.push(fvg_array, new_bullish_fvg)
+        
+        // Manage array size
+        if array.size(fvg_array) > max_fvgs
+            Gap oldest_fvg = array.shift(fvg_array) // Remove the oldest FVG
+            if not na(oldest_fvg.box_id)
+                box.delete(oldest_fvg.box_id)
+
+    // Bearish FVG Detection: high of candle[2] < low of candle[0]
+    // No 'else if' here, as a bar could theoretically form parts of both (though rare with this definition)
+    // or more practically, we want to process them independently before IFVG logic.
+    if high[2] < low[0] 
+        bearish_fvg_top = low[0]
+        bearish_fvg_bottom = high[2]
+        bearish_fvg_start_bar = bar_index - 1 // FVG is defined by candle [1]
+        
+        // Create new Gap object for Bearish FVG
+        new_bearish_fvg = Gap.new(bearish_fvg_top, bearish_fvg_bottom, bearish_fvg_start_bar, false, false, na, bar_index)
+        array.push(fvg_array, new_bearish_fvg)
+        
+        // Manage array size
+        if array.size(fvg_array) > max_fvgs
+            Gap oldest_fvg = array.shift(fvg_array) // Remove the oldest FVG
+            if not na(oldest_fvg.box_id)
+                box.delete(oldest_fvg.box_id)
+
+    // --- IFVG Detection and Array Management ---
+    // Iterate fvg_array from newest to oldest to allow removal while iterating
+    for i = array.size(fvg_array) - 1 to 0
+        Gap current_fvg = array.get(fvg_array, i)
+
+        // Check for Bullish IFVG (Bearish FVG violated and retested as support)
+        if not current_fvg.is_bullish // If it's a Bearish FVG
+            // Condition 1: Previous bar's close violated (closed above) the Bearish FVG's top
+            is_violated_prev_bar = close[1] > current_fvg.top
+            // Condition 2: Current bar's low retests the zone of the violated Bearish FVG
+            is_retested_curr_bar = low <= current_fvg.top and low >= current_fvg.bottom
+            // Condition 3: Current bar's close shows support (closes above the bottom of the zone)
+            is_held_curr_bar = close > current_fvg.bottom
+
+            if is_violated_prev_bar and is_retested_curr_bar and is_held_curr_bar
+                // This Bearish FVG has inverted into a Bullish IFVG
+                new_bullish_ifvg = Gap.new(current_fvg.top, current_fvg.bottom, bar_index, true, true, na, bar_index) // IFVG forms on current bar
+                array.push(ifvg_array, new_bullish_ifvg)
+                // Manage ifvg_array size
+                if array.size(ifvg_array) > max_fvgs
+                    Gap oldest_ifvg = array.shift(ifvg_array)
+                    if not na(oldest_ifvg.box_id) // Delete box of the oldest IFVG if it exists
+                        box.delete(oldest_ifvg.box_id)
+                
+                // Remove the original FVG from fvg_array
+                if not na(current_fvg.box_id) // Delete box of the FVG that is being inverted
+                    box.delete(current_fvg.box_id)
+                array.remove(fvg_array, i)
+                continue // Move to next FVG, as current_fvg is now removed
+
+        // Check for Bearish IFVG (Bullish FVG violated and retested as resistance)
+        if current_fvg.is_bullish // If it's a Bullish FVG
+            // Condition 1: Previous bar's close violated (closed below) the Bullish FVG's bottom
+            is_violated_prev_bar = close[1] < current_fvg.bottom
+            // Condition 2: Current bar's high retests the zone of the violated Bullish FVG
+            is_retested_curr_bar = high >= current_fvg.bottom and high <= current_fvg.top
+            // Condition 3: Current bar's close shows resistance (closes below the top of the zone)
+            is_held_curr_bar = close < current_fvg.top
+
+            if is_violated_prev_bar and is_retested_curr_bar and is_held_curr_bar
+                // This Bullish FVG has inverted into a Bearish IFVG
+                new_bearish_ifvg = Gap.new(current_fvg.top, current_fvg.bottom, bar_index, false, true, na, bar_index) // IFVG forms on current bar
+                array.push(ifvg_array, new_bearish_ifvg)
+                // Manage ifvg_array size
+                if array.size(ifvg_array) > max_fvgs
+                    Gap oldest_ifvg = array.shift(ifvg_array)
+                    if not na(oldest_ifvg.box_id) // Delete box of the oldest IFVG if it exists
+                        box.delete(oldest_ifvg.box_id)
+
+                // Remove the original FVG from fvg_array
+                if not na(current_fvg.box_id) // Delete box of the FVG that is being inverted
+                    box.delete(current_fvg.box_id)
+                array.remove(fvg_array, i)
+                // No continue needed here as it's the last check in the loop for this iteration (or add if more logic follows for current_fvg)
+
+// --- Mitigation and Plotting Logic ---
+
+// Plotting FVGs
+if barstate.islast or barstate.isconfirmed // Process on confirmed bars, update on last bar for extension
+    if show_fvg
+        for i = array.size(fvg_array) - 1 to 0 // Iterate backwards for safe removal/modification
+            Gap current_gap = array.get(fvg_array, i)
+            bool is_mitigated_fvg = false
+
+            // FVG Mitigation Check: Mitigated if price trades fully through it.
+            if current_gap.is_bullish and high > current_gap.top and low < current_gap.bottom // Price traded through
+                is_mitigated_fvg := true
+            else if not current_gap.is_bullish and low < current_gap.bottom and high > current_gap.top // Price traded through
+                is_mitigated_fvg := true
+            // Simpler mitigation: if price touches the far end.
+            // if current_gap.is_bullish and low < current_gap.bottom 
+            //     is_mitigated_fvg := true
+            // else if not current_gap.is_bullish and high > current_gap.top
+            //     is_mitigated_fvg := true
+            
+            if is_mitigated_fvg
+                if not na(current_gap.box_id)
+                    box.delete(current_gap.box_id)
+                array.remove(fvg_array, i) 
+            else
+                // Not mitigated, plot or update box
+                fvg_color = current_gap.is_bullish ? color.new(color.green, 70) : color.new(color.red, 70)
+                fvg_text = current_gap.is_bullish ? "FVG" : "FVG" // Could add Top/Bottom/ID later
+                if na(current_gap.box_id)
+                    // Only draw new boxes on the historical bar where it formed if it's within fvg_lookback, or always for current ones
+                    if bar_index - current_gap.start_bar <= fvg_lookback 
+                        current_gap.box_id := box.new(left=current_gap.start_bar, top=current_gap.top, right=current_gap.start_bar + box_extension, bottom=current_gap.bottom, border_color=na, bgcolor=fvg_color, text=fvg_text, text_size=size.tiny, text_halign=text.align_center)
+                else
+                    // Extend existing box to the right, limited by fvg_lookback from its start bar or current bar + extension
+                    new_right_boundary = math.min(current_gap.start_bar + fvg_lookback, bar_index + box_extension)
+                    box.set_right(current_gap.box_id, new_right_boundary)
+                    if bar_index > current_gap.start_bar + fvg_lookback // If box is past its fvg_lookback visibility from formation
+                         if not na(current_gap.box_id)
+                            box.delete(current_gap.box_id)
+                         array.remove(fvg_array, i) // Remove the expired Gap object
+                         continue // Skip to next iteration as this gap is removed
+
+    // Plotting IFVGs
+    if show_ifvg
+        for i = array.size(ifvg_array) - 1 to 0 // Iterate backwards
+            Gap current_gap = array.get(ifvg_array, i)
+            bool is_mitigated_ifvg = false
+
+            // IFVG Mitigation Check (using same logic as FVG: price trades fully through it)
+            if current_gap.is_bullish and high > current_gap.top and low < current_gap.bottom 
+                is_mitigated_ifvg := true
+            else if not current_gap.is_bullish and low < current_gap.bottom and high > current_gap.top
+                is_mitigated_ifvg := true
+            
+            if is_mitigated_ifvg
+                if not na(current_gap.box_id)
+                    box.delete(current_gap.box_id)
+                array.remove(ifvg_array, i)
+            else
+                // Not mitigated, plot or update box
+                ifvg_color = current_gap.is_bullish ? color.new(color.blue, 70) : color.new(color.orange, 70)
+                ifvg_text = current_gap.is_bullish ? "IFVG" : "IFVG"
+                if na(current_gap.box_id)
+                     if bar_index - current_gap.start_bar <= fvg_lookback // Use fvg_lookback for IFVGs too for consistency
+                        current_gap.box_id := box.new(left=current_gap.start_bar, top=current_gap.top, right=current_gap.start_bar + box_extension, bottom=current_gap.bottom, border_color=na, bgcolor=ifvg_color, text=ifvg_text, text_size=size.tiny, text_halign=text.align_center)
+                else
+                    new_right_boundary = math.min(current_gap.start_bar + fvg_lookback, bar_index + box_extension)
+                    box.set_right(current_gap.box_id, new_right_boundary)
+                    if bar_index > current_gap.start_bar + fvg_lookback
+                        if not na(current_gap.box_id)
+                            box.delete(current_gap.box_id)
+                        array.remove(ifvg_array, i) // Remove the expired Gap object
+                        continue // Skip to next iteration as this gap is removed
+
+// --- FVG/IFVG Entry Alerts ---
+if barstate.isconfirmed // Or barstate.islast if alerts only on the most recent bar's interaction
+    // FVG Entry Alerts
+    if show_fvg // Only alert if FVGs are shown/active
+        for gap in fvg_array // Iterate through active (unmitigated) FVGs
+            if gap.is_bullish
+                if low <= gap.top and high >= gap.bottom // Price enters bullish FVG zone
+                    alert_fvg_entry_message = "Price entered Bullish FVG for " + syminfo.ticker + ". Zone: " + str.tostring(gap.bottom, format.mintick) + " - " + str.tostring(gap.top, format.mintick)
+                    alert(alert_fvg_entry_message, freq = alert.freq_once_per_bar_close)
+            else // Bearish FVG
+                if high >= gap.bottom and low <= gap.top // Price enters bearish FVG zone
+                    alert_fvg_entry_message = "Price entered Bearish FVG for " + syminfo.ticker + ". Zone: " + str.tostring(gap.bottom, format.mintick) + " - " + str.tostring(gap.top, format.mintick)
+                    alert(alert_fvg_entry_message, freq = alert.freq_once_per_bar_close)
+
+    // IFVG Entry Alerts
+    if show_ifvg // Only alert if IFVGs are shown/active
+        for gap in ifvg_array // Iterate through active (unmitigated) IFVGs
+            if gap.is_bullish // Bullish IFVG (acts as support)
+                if low <= gap.top and high >= gap.bottom // Price enters bullish IFVG zone
+                    alert_ifvg_entry_message = "Price entered Bullish IFVG for " + syminfo.ticker + ". Zone: " + str.tostring(gap.bottom, format.mintick) + " - " + str.tostring(gap.top, format.mintick)
+                    alert(alert_ifvg_entry_message, freq = alert.freq_once_per_bar_close)
+            else // Bearish IFVG (acts as resistance)
+                if high >= gap.bottom and low <= gap.top // Price enters bearish IFVG zone
+                    alert_ifvg_entry_message = "Price entered Bearish IFVG for " + syminfo.ticker + ". Zone: " + str.tostring(gap.bottom, format.mintick) + " - " + str.tostring(gap.top, format.mintick)
+                    alert(alert_ifvg_entry_message, freq = alert.freq_once_per_bar_close)
