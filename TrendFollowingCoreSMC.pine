@@ -171,6 +171,7 @@ add_ob_to_array(arr, high_val, low_val, bar_val, type_val) =>
         if array.size(arr) > max_ob_count * 5
             for i = 0 to 4 // Remove the 5 elements of the oldest OB
                 array.pop(arr)
+    arr // Explicitly return the modified array
 
 // Helper function to update mitigation status and remove old boxes
 check_and_plot_obs(ob_array, box_array, is_bullish_type) =>
@@ -230,8 +231,7 @@ check_and_plot_obs(ob_array, box_array, is_bullish_type) =>
         if should_delete
             box.delete(current_box)
             
-    ob_array // return potentially modified array (mitigation status)
-    new_box_array // return new set of boxes
+    return [ob_array, new_box_array] // return new set of boxes
 
 
 // OB Detection Logic (runs on each bar)
@@ -266,7 +266,7 @@ if barstate.isconfirmed // Only run on closed candles
                     is_overlapping := true
                     break
             if not is_overlapping
-                 add_ob_to_array(array_bullish_ob, ob_high_price, ob_low_price, bar_index[1], 1)
+                 array_bullish_ob := add_ob_to_array(array_bullish_ob, ob_high_price, ob_low_price, bar_index[1], 1)
 
 
     // Bearish OB Detection: Last up candle before strong down move
@@ -291,14 +291,14 @@ if barstate.isconfirmed // Only run on closed candles
                     is_overlapping := true
                     break
             if not is_overlapping
-                add_ob_to_array(array_bearish_ob, ob_high_price, ob_low_price, bar_index[1], -1)
+                array_bearish_ob := add_ob_to_array(array_bearish_ob, ob_high_price, ob_low_price, bar_index[1], -1)
 
 
 // Update mitigation and plot OBs
-array_bullish_ob := check_and_plot_obs(array_bullish_ob, array_bullish_ob_boxes, true)
-array_bearish_ob := check_and_plot_obs(array_bearish_ob, array_bearish_ob_boxes, false)
-array_bullish_ob_boxes := array.filter(array_bullish_ob_boxes, b => box.get_id(b) != "") // Keep valid boxes
-array_bearish_ob_boxes := array.filter(array_bearish_ob_boxes, b => box.get_id(b) != "") // Keep valid boxes
+[array_bullish_ob, array_bullish_ob_boxes] = check_and_plot_obs(array_bullish_ob, array_bullish_ob_boxes, true)
+[array_bearish_ob, array_bearish_ob_boxes] = check_and_plot_obs(array_bearish_ob, array_bearish_ob_boxes, false)
+// array_bullish_ob_boxes := array.filter(array_bullish_ob_boxes, b => box.get_id(b) != "") // No longer needed
+// array_bearish_ob_boxes := array.filter(array_bearish_ob_boxes, b => box.get_id(b) != "") // No longer needed
 
 // Clean up very old OBs from the arrays (e.g., older than lookback * 2) to prevent array from growing too large over time
 if bar_index % 100 == 0 // Run cleanup periodically
@@ -338,6 +338,7 @@ add_fvg_to_array(arr, top_val, bottom_val, bar_val, type_val) =>
         if array.size(arr) > max_fvg_count * 5
             for i = 0 to 4
                 array.pop(arr)
+    arr // Explicitly return the modified array
 
 // Helper function to update FVG mitigation status and manage boxes
 check_and_plot_fvgs(fvg_array, box_array, is_bullish_fvg) =>
@@ -395,8 +396,7 @@ check_and_plot_fvgs(fvg_array, box_array, is_bullish_fvg) =>
         if should_delete
             box.delete(current_box)
 
-    fvg_array
-    new_box_array
+    return [fvg_array, new_box_array]
 
 
 // FVG Detection Logic (runs on each bar, looking at bar[1] as the middle candle of a 3-bar pattern)
@@ -423,7 +423,7 @@ if barstate.isconfirmed // Ensure calculations are on closed candles
                     is_overlapping := true
                     break
             if not is_overlapping
-                add_fvg_to_array(array_bullish_fvg, fvg_top_price, fvg_bottom_price, bar_index[1], 1)
+                array_bullish_fvg := add_fvg_to_array(array_bullish_fvg, fvg_top_price, fvg_bottom_price, bar_index[1], 1)
 
 
     // Bearish FVG: high[2] < low[0]. FVG is space between low[0] and high[2], on candle[1].
@@ -442,14 +442,14 @@ if barstate.isconfirmed // Ensure calculations are on closed candles
                     is_overlapping := true
                     break
             if not is_overlapping
-                add_fvg_to_array(array_bearish_fvg, fvg_top_price, fvg_bottom_price, bar_index[1], -1)
+                array_bearish_fvg := add_fvg_to_array(array_bearish_fvg, fvg_top_price, fvg_bottom_price, bar_index[1], -1)
 
 
 // Update mitigation and plot FVGs
-array_bullish_fvg := check_and_plot_fvgs(array_bullish_fvg, array_bullish_fvg_boxes, true)
-array_bearish_fvg := check_and_plot_fvgs(array_bearish_fvg, array_bearish_fvg_boxes, false)
-array_bullish_fvg_boxes := array.filter(array_bullish_fvg_boxes, b => box.get_id(b) != "")
-array_bearish_fvg_boxes := array.filter(array_bearish_fvg_boxes, b => box.get_id(b) != "")
+[array_bullish_fvg, array_bullish_fvg_boxes] = check_and_plot_fvgs(array_bullish_fvg, array_bullish_fvg_boxes, true)
+[array_bearish_fvg, array_bearish_fvg_boxes] = check_and_plot_fvgs(array_bearish_fvg, array_bearish_fvg_boxes, false)
+// array_bullish_fvg_boxes := array.filter(array_bullish_fvg_boxes, b => box.get_id(b) != "") // No longer needed
+// array_bearish_fvg_boxes := array.filter(array_bearish_fvg_boxes, b => box.get_id(b) != "") // No longer needed
 
 // Clean up very old FVGs from the arrays
 if bar_index % 100 == 0 // Run cleanup periodically
@@ -579,6 +579,17 @@ if barstate.isconfirmed // Process on closed candles
 
                 if is_strong_bullish_candle and rsi_long_ok and volume_long_ok
                     long_signal := true
+                    // Calculate SL/TP for the CURRENT signal for the alert
+                    temp_sl_long = close - (current_atr * atr_multiplier_sl)
+                    temp_risk_long = close - temp_sl_long
+                    temp_tp1_long = close + (temp_risk_long * rrr_tp1)
+                    temp_tp2_long = close + (temp_risk_long * rrr_tp2)
+                    
+                    alert_message_long = "Long Signal for " + syminfo.ticker + " (" + timeframe.period + "). Entry: " + str.tostring(close, format.mintick) + 
+                                         ". SL: " + str.tostring(temp_sl_long, format.mintick) + 
+                                         ". TP1: " + str.tostring(temp_tp1_long, format.mintick) + 
+                                         ". TP2: " + str.tostring(temp_tp2_long, format.mintick)
+                    alert(alert_message_long, freq = alert.freq_once_per_bar_close)
                     // Potentially reset in_long_trade_zone here if one signal per zone crossing is desired
                     // For now, it signals on every confirmed candle in the zone
 
@@ -608,6 +619,17 @@ if barstate.isconfirmed // Process on closed candles
 
                 if is_strong_bearish_candle and rsi_short_ok and volume_short_ok
                     short_signal := true
+                    // Calculate SL/TP for the CURRENT signal for the alert
+                    temp_sl_short = close + (current_atr * atr_multiplier_sl)
+                    temp_risk_short = temp_sl_short - close
+                    temp_tp1_short = close - (temp_risk_short * rrr_tp1)
+                    temp_tp2_short = close - (temp_risk_short * rrr_tp2)
+
+                    alert_message_short = "Short Signal for " + syminfo.ticker + " (" + timeframe.period + "). Entry: " + str.tostring(close, format.mintick) + 
+                                          ". SL: " + str.tostring(temp_sl_short, format.mintick) + 
+                                          ". TP1: " + str.tostring(temp_tp1_short, format.mintick) + 
+                                          ". TP2: " + str.tostring(temp_tp2_short, format.mintick)
+                    alert(alert_message_short, freq = alert.freq_once_per_bar_close)
                     // Potentially reset in_short_trade_zone here
 
 // --- Plotting Signals ---
