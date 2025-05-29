@@ -1,0 +1,146 @@
+//@version=5
+indicator("Medium Term Trend Trader", overlay=true)
+
+// Input Parameters
+smaPeriod = input.int(50, title="SMA Period")
+fastLength = input.int(12, title="MACD Fast Length")
+slowLength = input.int(26, title="MACD Slow Length")
+signalLength = input.int(9, title="MACD Signal Length")
+riskPercent = input.float(1.0, title="Risk Percentage per Trade", minval=0.1, step=0.1)
+stopLossPercent = input.float(2.0, title="Stop-Loss Percentage", minval=0.1, step=0.1)
+rewardRiskRatio = input.float(2.0, title="Reward/Risk Ratio", minval=0.1, step=0.1)
+accountBalance = input.float(10000, title="Account Balance (for Info)", minval=1)
+
+// Indicator Calculations
+smaValue = ta.sma(close, smaPeriod)
+[macdLine, signalLine, histLine] = ta.macd(close, fastLength, slowLength, signalLength)
+
+// SMA Trend Direction
+smaIsRising = smaValue > smaValue[1]
+smaIsFalling = smaValue < smaValue[1]
+
+// Entry Conditions
+bullishEntryCondition = close > smaValue and smaIsRising and ta.crossover(macdLine, signalLine)
+bearishEntryCondition = close < smaValue and smaIsFalling and ta.crossunder(macdLine, signalLine)
+
+// Exit Conditions
+exitLongCondition = ta.crossunder(macdLine, signalLine) or close < smaValue
+exitShortCondition = ta.crossover(macdLine, signalLine) or close > smaValue
+
+// Trade State Management and SL/TP Calculation
+var bool inLongTrade = false
+var bool inShortTrade = false
+var float entryPrice = na
+var float stopLossLevel = na
+var float takeProfitLevel = na
+
+// Check for Long Entry
+if (bullishEntryCondition and not inLongTrade)
+    inLongTrade := true
+    inShortTrade := false
+    entryPrice := close
+    stopLossLevel := entryPrice * (1 - stopLossPercent / 100)
+    takeProfitLevel := entryPrice * (1 + (stopLossPercent * rewardRiskRatio) / 100)
+    // Reset short trade variables if a long is initiated (e.g. from neutral)
+    // This logic primarily handles switching states or initiating from neutral.
+    // If switching from short to long directly, previous state already false.
+
+// Check for Short Entry
+if (bearishEntryCondition and not inShortTrade)
+    inShortTrade := true
+    inLongTrade := false
+    entryPrice := close
+    stopLossLevel := entryPrice * (1 + stopLossPercent / 100)
+    takeProfitLevel := entryPrice * (1 - (stopLossPercent * rewardRiskRatio) / 100)
+
+// Check for Long Exit (based on exit condition or SL/TP)
+// For now, exit conditions are primary. SL/TP hit checks will be added to plotting/alerts.
+if (inLongTrade and (exitLongCondition or close <= stopLossLevel or close >= takeProfitLevel))
+    inLongTrade := false
+    entryPrice := na
+    stopLossLevel := na
+    takeProfitLevel := na
+
+// Check for Short Exit (based on exit condition or SL/TP)
+if (inShortTrade and (exitShortCondition or close >= stopLossLevel or close <= takeProfitLevel))
+    inShortTrade := false
+    entryPrice := na
+    stopLossLevel := na
+    takeProfitLevel := na
+    
+// If both bullish and bearish conditions are true on the same bar (rare, but possible with some conditions)
+// this logic prioritizes the one checked first or based on existing state.
+// To simplify, we ensure that entering one trade type explicitly sets the other to false.
+// Also, if an exit occurs, we reset state *before* checking for new entries on the same bar.
+// The order of operations within a bar is:
+// 1. Process exits based on previous state.
+// 2. Process entries based on new state.
+// PineScript executes from top to bottom. The current structure processes entries first, then exits.
+// Let's refine the order: calculate exits first based on the state from the *previous* bar, then entries.
+
+// Corrected structure for state management within a bar:
+// (Worker should implement this refined logic)
+
+// Reset state variables if an exit condition was met on previous state
+if (inLongTrade[1] and (exitLongCondition or (low <= stopLossLevel[1] and high >= stopLossLevel[1]) or (low <= takeProfitLevel[1] and high >= takeProfitLevel[1]))) // check if SL or TP was touched
+    inLongTrade := false
+    // entryPrice, SL, TP will be reset below if no new trade, or overwritten by new trade
+
+if (inShortTrade[1] and (exitShortCondition or (low <= stopLossLevel[1] and high >= stopLossLevel[1]) or (low <= takeProfitLevel[1] and high >= takeProfitLevel[1]))) // check if SL or TP was touched
+    inShortTrade := false
+    // entryPrice, SL, TP will be reset below if no new trade, or overwritten by new trade
+
+// Determine new state based on entry conditions
+if (bullishEntryCondition and not inLongTrade[1]) // only enter if wasn't already long
+    if(inShortTrade[1]) // if was short, exit short specific logic (already handled by exitShortCondition generally)
+        inShortTrade := false 
+    inLongTrade := true
+    entryPrice := close
+    stopLossLevel := entryPrice * (1 - stopLossPercent / 100)
+    takeProfitLevel := entryPrice * (1 + (stopLossPercent * rewardRiskRatio) / 100)
+else if (bearishEntryCondition and not inShortTrade[1]) // only enter if wasn't already short
+    if(inLongTrade[1]) // if was long, exit long specific logic
+        inLongTrade := false
+    inShortTrade := true
+    entryPrice := close
+    stopLossLevel := entryPrice * (1 + stopLossPercent / 100)
+    takeProfitLevel := entryPrice * (1 - (stopLossPercent * rewardRiskRatio) / 100)
+
+// If state changed to false (exit) and no new trade was entered, ensure SL/TP are na
+if ((inLongTrade[1] and not inLongTrade) or (inShortTrade[1] and not inShortTrade)) and not inLongTrade and not inShortTrade
+    entryPrice := na
+    stopLossLevel := na
+    takeProfitLevel := na
+
+// Informational Position Sizing
+var float positionSize = na
+riskAmount = accountBalance * (riskPercent / 100)
+
+if (not na(entryPrice) and not na(stopLossLevel) and (entryPrice - stopLossLevel) != 0)
+    positionSize := riskAmount / math.abs(entryPrice - stopLossLevel)
+else
+    positionSize := na // Reset if no active trade
+
+// Plotting and Visuals
+// Plot SMA
+plot(smaValue, "SMA", color=color.new(color.blue, 0), linewidth=2)
+
+// Plot Entry Signals
+plotshape(bullishEntryCondition and not inLongTrade[1], title="Bullish Entry", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.normal)
+plotshape(bearishEntryCondition and not inShortTrade[1], title="Bearish Entry", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.normal)
+
+// Plot SL and TP levels when a trade is active
+plot(inLongTrade or inShortTrade ? entryPrice : na, "Entry Price", color=color.new(color.gray, 0), style=plot.style_linebr)
+plot(inLongTrade or inShortTrade ? stopLossLevel : na, "Stop Loss", color=color.new(color.red, 0), style=plot.style_linebr)
+plot(inLongTrade or inShortTrade ? takeProfitLevel : na, "Take Profit", color=color.new(color.green, 0), style=plot.style_linebr)
+
+// Display Informational Text (e.g., Position Size)
+var label posSizeLabel = na
+if (not na(positionSize) and (inLongTrade or inShortTrade))
+    posSizeLabel := label.new(bar_index, high, text="Pos Size: " + str.tostring(positionSize, "#.##"), 
+                             color=color.new(color.silver, 20), textcolor=color.black, 
+                             style=label.style_label_left, yloc=yloc.price)
+else
+    label.delete(posSizeLabel) // Delete label if no active trade or positionSize is na
+
+// Alerts will follow
