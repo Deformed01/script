@@ -1,0 +1,129 @@
+//@version=5
+indicator("CVD and Open Interest", shorttitle="CVD/OI", overlay=false, timeframe="")
+
+// Input Groups
+grpSignalThresholds = "Signal Thresholds"
+grpVisualization = "Visualization Options"
+grpAlerts = "Alert Configuration" // New group for alert messages
+
+// Inputs
+cvdLength = input.int(20, title="CVD Calculation Length", group=grpSignalThresholds)
+cvdFlatThreshold = input.float(0.005, title="CVD Flat Threshold (0.5%)", minval=0, step=0.001, group=grpSignalThresholds)
+oiIncreaseThreshold = input.float(0.01, title="OI Not Sig. Increase Thold (1%)", minval=0, step=0.001, group=grpSignalThresholds)
+
+showBgColor = input.bool(true, title="Show Background Color Signals", group=grpVisualization)
+showShapes = input.bool(true, title="Show Shape Signals", group=grpVisualization)
+showArrows = input.bool(true, title="Show Arrow Signals", group=grpVisualization)
+
+// --- Alert Messages Inputs ---
+alertMsgNewBuyers = input.text("Bullish: New Buyers (CVD Rising, OI Increasing)", title="New Buyers", group=grpAlerts)
+alertMsgNewShorts = input.text("Bearish: New Shorts (CVD Falling, OI Increasing)", title="New Shorts", group=grpAlerts)
+alertMsgShortCovering = input.text("Bullish: Short Covering (CVD Rising, OI Decreasing)", title="Short Covering", group=grpAlerts)
+alertMsgLongLiquidation = input.text("Bearish: Long Liquidation (CVD Falling, OI Decreasing)", title="Long Liquidation", group=grpAlerts)
+alertMsgWeakBuyingDiv = input.text("Divergence: Weak Buying (Price Up, CVD Flat/Neg, OI Not Up Sig.)", title="Weak Buying Divergence", group=grpAlerts)
+alertMsgContextShortCovering = input.text("Context: Possible Short Covering (CVD Pos & Rising, OI Stagnant)", title="Context: Suspected Short Covering", group=grpAlerts)
+
+// Calculate Volume Delta for the current bar
+volumeDelta = if close > open
+    volume
+else if close < open
+    -volume
+else
+    0.0
+
+// Calculate Cumulative Volume Delta (CVD)
+cvd = ta.cum(volumeDelta)
+
+// Open Interest
+oi = openint
+
+// --- Define Trends ---
+isCvdRising = cvd > cvd[1]
+isCvdFalling = cvd < cvd[1]
+
+// Check for na in OI before comparison
+validOiComparison = not na(oi) and not na(oi[1])
+isOiIncreasing = validOiComparison and oi > oi[1]
+isOiDecreasing = validOiComparison and oi < oi[1]
+isOiStagnant = validOiComparison and oi == oi[1]
+
+// --- Logic for Combining CVD and OI ---
+
+// A. Confirming Trends
+bullishSignal_NewBuyers = isCvdRising and isOiIncreasing
+// For bearishSignal_NewShorts:
+// Original issue desc: "negative CVD with rising OI".
+// Current impl: "isCvdFalling (cvd < cvd[1]) and isOiIncreasing". This captures increasing selling pressure.
+// If an absolute check (cvd < 0) is desired, the condition would be: (cvd < 0 and isOiIncreasing).
+// The current relative change approach (isCvdFalling) is generally useful for dynamic conditions.
+bearishSignal_NewShorts = isCvdFalling and isOiIncreasing
+bearishSignal_LongLiquidation = isCvdFalling and isOiDecreasing
+bullishSignal_ShortCovering = isCvdRising and isOiDecreasing
+
+// B. Divergences
+isPriceRising = close > close[1]
+// CVD flat: change is less than threshold (e.g. 0.5% of previous CVD value)
+// Use nz() to avoid division by zero if cvd[1] is 0, and handle cvd[1] being na.
+cvdChange = nz(cvd[1]) == 0 ? (cvd == 0 ? 0 : 1) : (cvd - cvd[1]) / cvd[1]
+isCvdFlat = math.abs(cvdChange) < cvdFlatThreshold
+isCvdNegative = cvd < 0
+isCvdFlatOrNegativeLogic = isCvdNegative or isCvdFlat
+
+// OI not increasing significantly: OI is not rising or rising by less than threshold (e.g. 1% of previous OI)
+// Use nz() for oi[1] to handle potential na or zero values safely.
+oiChangeRatio = nz(oi[1]) == 0 ? (oi == 0 ? 0 : 1) : (oi - oi[1]) / oi[1]
+isOiNotIncreasingSignificantlyLogic = not isOiIncreasing or (isOiIncreasing and oiChangeRatio < oiIncreaseThreshold)
+
+divergenceSignal_WeakBuying = isPriceRising and isCvdFlatOrNegativeLogic and isOiNotIncreasingSignificantlyLogic
+
+// C. Volume and Sentiment Context
+isCvdPositiveAndRising = cvd > 0 and isCvdRising
+contextSignal_ShortCoveringSuspected = isCvdPositiveAndRising and isOiStagnant
+// This is a more specific version of bullishSignal_ShortCovering focusing on positive CVD.
+
+// --- Plotting ---
+plot(cvd, title="CVD", color=color.new(color.blue, 0), ZOrder=0) // Ensure CVD is plotted
+plot(oi, title="Open Interest", color=color.new(color.orange, 0), display=display.data_window + display.status_line, ZOrder=0) // Ensure OI is plotted
+
+// --- Visualizing Signals ---
+
+// Background Colors (Conditional)
+if showBgColor
+    bgcolor(bullishSignal_NewBuyers ? color.new(color.green, 85) : na, title="BG: New Buyers")
+    bgcolor(bearishSignal_NewShorts ? color.new(color.red, 85) : na, title="BG: New Shorts")
+    bgcolor(bullishSignal_ShortCovering ? color.new(color.lime, 90) : na, title="BG: Short Covering")
+    bgcolor(bearishSignal_LongLiquidation ? color.new(color.maroon, 90) : na, title="BG: Long Liquidation")
+    bgcolor(divergenceSignal_WeakBuying ? color.new(color.yellow, 85) : na, title="BG: Weak Buying Div.")
+    bgcolor(contextSignal_ShortCoveringSuspected ? color.new(color.aqua, 90) : na, title="BG: Context Shorts Covering")
+
+// Shapes and Arrows (Conditional)
+if showShapes
+    plotshape(bullishSignal_ShortCovering, title="Shape: Short Covering", location=location.belowbar, color=color.new(color.lime,30), style=shape.triangleup, size=size.small, ZOrder=1)
+    plotshape(bearishSignal_LongLiquidation, title="Shape: Long Liquidation", location=location.abovebar, color=color.new(color.maroon,30), style=shape.triangledown, size=size.small, ZOrder=1)
+    plotshape(divergenceSignal_WeakBuying, title="Shape: Weak Buying Div.", location=location.bottom, // Plot near CVD line
+              text="D", textcolor=color.new(color.black,0),
+              color=color.new(color.yellow,30), style=shape.circle, size=size.tiny, ZOrder=1)
+              // Display 'D' on the shape. Location.bottom might not be ideal if CVD is far from zero.
+
+if showArrows
+    plotarrow(bullishSignal_NewBuyers ? 1 : na, title="Arrow: New Buyers", colorup=color.new(color.green,30), colordown=na, maxheight=30, minheight=20, ZOrder=2)
+    plotarrow(bearishSignal_NewShorts ? -1 : na, title="Arrow: New Shorts", colorup=na, colordown=color.new(color.red,30), maxheight=30, minheight=20, ZOrder=2)
+
+// --- Alerts ---
+if bullishSignal_NewBuyers
+    alertcondition(bullishSignal_NewBuyers, title="CVD/OI: New Buyers", message=alertMsgNewBuyers)
+
+if bearishSignal_NewShorts
+    alertcondition(bearishSignal_NewShorts, title="CVD/OI: New Shorts", message=alertMsgNewShorts)
+
+if bullishSignal_ShortCovering
+    alertcondition(bullishSignal_ShortCovering, title="CVD/OI: Short Covering", message=alertMsgShortCovering)
+
+if bearishSignal_LongLiquidation
+    alertcondition(bearishSignal_LongLiquidation, title="CVD/OI: Long Liquidation", message=alertMsgLongLiquidation)
+
+if divergenceSignal_WeakBuying
+    alertcondition(divergenceSignal_WeakBuying, title="CVD/OI: Weak Buying Divergence", message=alertMsgWeakBuyingDiv)
+
+if contextSignal_ShortCoveringSuspected
+    alertcondition(contextSignal_ShortCoveringSuspected, title="CVD/OI: Context - Suspected Short Covering", message=alertMsgContextShortCovering)
