@@ -1,0 +1,307 @@
+//@version=5
+// --- Indicator Declaration and Description ---
+// This indicator identifies Fair Value Gaps (FVGs) as Internal Range Liquidity (IRL)
+// and Swing Points as External Range Liquidity (ERL).
+// It then uses a Market Maker Execution Model (MMXM) to signal potential entries
+// based on ERL being taken followed by a retest of an FVG.
+indicator(
+     title="Draw On Liquidity (MMXM)",
+     shorttitle="DOL (MMXM)",
+     overlay=true,
+     description="Identifies FVGs (IRL) and Swing Points (ERL). Signals MMXM entries based on ERL taken, then FVG retest. Includes options for ERL lines and alerts."
+     )
+
+// --- Script Inputs ---
+// FVG Settings
+fvgGroupTitle = "FVG Settings"
+minFvgSize = input.float(0.0, title="Minimum FVG Size", minval=0.0, step=0.01, group=fvgGroupTitle)
+
+// Swing Point Settings
+swingGroupTitle = "Swing Point Settings"
+swingLookback = input.int(5, title="Swing Lookback Period", minval=1, group=swingGroupTitle)
+
+// MMXM Settings
+mmxmGroupTitle = "MMXM Settings"
+enableMMXMSignals = input.bool(true, title="Enable MMXM Signals", group=mmxmGroupTitle)
+drawErlTakenLines = input.bool(false, title="Draw ERL Taken Lines", group=mmxmGroupTitle)
+fvgLookbackForMMXM = input.int(10, title="FVG Lookback for MMXM", minval=1, group=mmxmGroupTitle)
+
+
+// --- FVG Detection Logic ---
+
+// --- Custom Data Type for FVG Info ---
+type FvgInfo
+    float topPrice
+    float bottomPrice
+    int barIndex // Bar index where FVG was formed (second candle of the pattern)
+    bool isBullish // true for bullish, false for bearish
+    box fvgBox // To store the box object for drawing
+    bool isMitigated
+    int mitigatedBarIndex // Bar index when FVG was mitigated
+
+// Arrays to store active FVGs
+var array<FvgInfo> bullishFvgs = array.new<FvgInfo>()
+var array<FvgInfo> bearishFvgs = array.new<FvgInfo>()
+
+// --- FVG Detection Logic ---
+// The FVG is identified at the completion of the 3rd candle.
+// The actual FVG zone relates to the 2nd candle of the pattern.
+// So, when checking conditions for candles at index 2, 1, 0 (0 being current),
+// the FVG forms at candle index 1.
+
+// Bullish FVG:
+// Low of candle at index 2 (first candle) is above high of candle at index 0 (third candle)
+// FVG space is between high of candle at index 2 and low of candle at index 0.
+// This FVG occurs at the bar index of the *second* candle (bar_index[1]).
+bool isBullishFvgPattern = low[2] > high[0]
+float bullishFvgSize = high[2] - low[0]
+
+if isBullishFvgPattern and bullishFvgSize >= minFvgSize
+    // Store bullish FVG
+    bullishFvgTop = high[2]
+    bullishFvgBottom = low[0]
+    array.push(bullishFvgs, FvgInfo.new(bullishFvgTop, bullishFvgBottom, bar_index[1], true, na, false, -1))
+    // Note: bar_index[1] is the bar where the FVG "lives"
+
+// Bearish FVG:
+// High of candle at index 2 (first candle) is below low of candle at index 0 (third candle)
+// FVG space is between low of candle at index 2 and high of candle at index 0.
+// This FVG occurs at the bar index of the *second* candle (bar_index[1]).
+bool isBearishFvgPattern = high[2] < low[0]
+float bearishFvgSize = high[0] - low[2]
+
+if isBearishFvgPattern and bearishFvgSize >= minFvgSize
+    // Store bearish FVG
+    bearishFvgTop = high[0]
+    bearishFvgBottom = low[2]
+    array.push(bearishFvgs, FvgInfo.new(bearishFvgTop, bearishFvgBottom, bar_index[1], false, na, false, -1))
+    // Note: bar_index[1] is the bar where the FVG "lives"
+
+// --- Global Variables for MMXM ---
+var float lastConfirmedSwingHighPrice = na
+var int lastConfirmedSwingHighBar = -1
+var float lastConfirmedSwingLowPrice = na
+var int lastConfirmedSwingLowBar = -1
+
+var bool isErlHighTakenRecently = false // Flag to indicate ERL high was taken, awaiting FVG retest
+var bool isErlLowTakenRecently = false  // Flag to indicate ERL low was taken, awaiting FVG retest
+var float erlLevelTaken = na          // Price of the ERL that was taken
+var int erlTakenBarIndex = -1         // Bar index when the ERL was taken
+var line erlLine = na                  // Line object for drawing ERL taken line
+
+// --- Swing Point Detection Logic ---
+// A swing high is identified at bar `S` (which is `bar_index[swingLookback]`) if:
+// - `high[S]` is strictly greater than the highs of `swingLookback` bars to its LEFT (older bars: `S+1` to `S+swingLookback`).
+// - `high[S]` is strictly greater than the highs of `swingLookback` bars to its RIGHT (more recent bars: `S-1` down to `S-swingLookback`, which are `bar_index[swingLookback-1]` down to `bar_index[0]`).
+// A swing low is identified similarly for lows.
+// Detection is only possible `swingLookback` bars *after* the swing point has formed, as we need to observe the bars to its right.
+
+// Pivot bar: The candle we are checking to see if it's a swing point. This is `swingLookback` bars in the past.
+float pivotHigh = high[swingLookback]
+float pivotLow = low[swingLookback]
+
+bool isSwingHigh = true // Assume it's a swing high until a condition fails
+bool isSwingLow = true  // Assume it's a swing low until a condition fails
+
+// Check `swingLookback` bars to the LEFT of the pivot bar (older bars)
+// These are indices `swingLookback + 1`, `swingLookback + 2`, ..., `swingLookback + swingLookback`
+for i = 1 to swingLookback
+    if pivotHigh <= high[swingLookback + i]
+        isSwingHigh := false
+    if pivotLow >= low[swingLookback + i]
+        isSwingLow := false
+    if not isSwingHigh and not isSwingLow // Optimization: if both flags are false, no need to check further
+        break
+
+// Check `swingLookback` bars to the RIGHT of the pivot bar (more recent bars, from pivot's right up to current bar)
+// These are indices `swingLookback - 1`, `swingLookback - 2`, ..., `0`
+if isSwingHigh or isSwingLow // Only proceed if still potentially a swing point
+    for i = 0 to swingLookback - 1
+        // high[i] refers to bars from current (0) to `swingLookback-1` bars ago.
+        // These are the bars to the right of the pivot bar `high[swingLookback]`.
+        if pivotHigh <= high[i]
+            isSwingHigh := false
+        if pivotLow >= low[i]
+            isSwingLow := false
+        if not isSwingHigh and not isSwingLow // Optimization
+            break
+
+// Plotting the swing points
+// The identified swing point (pivotHigh/pivotLow) occurred at `bar_index[swingLookback]`.
+// We use `offset = -swingLookback` to plot the shape on that historical bar.
+if isSwingHigh
+    lastConfirmedSwingHighPrice := pivotHigh
+    lastConfirmedSwingHighBar := bar_index[swingLookback]
+    plotshape(series=pivotHigh, title="Swing High", location=location.abovebar, color=color.new(color.maroon, 0), style=shape.triangledown, size=size.tiny, offset=-swingLookback)
+
+if isSwingLow
+    lastConfirmedSwingLowPrice := pivotLow
+    lastConfirmedSwingLowBar := bar_index[swingLookback]
+    plotshape(series=pivotLow, title="Swing Low", location=location.belowbar, color=color.new(color.purple, 0), style=shape.triangleup, size=size.tiny, offset=-swingLookback)
+
+// --- ERL Taken Detection ---
+// Executed on every bar to see if a confirmed ERL has been taken by the current bar's close.
+bool isErlHighTakenThisBar = false
+if not na(lastConfirmedSwingHighPrice) and close > lastConfirmedSwingHighPrice
+    // This condition means a confirmed swing high has been breached by the close.
+    isErlHighTakenThisBar := true       // Mark that it happened on this bar.
+    isErlHighTakenRecently := true      // Set state: looking for bearish FVG retest.
+    isErlLowTakenRecently := false      // Reset opposite state.
+    erlLevelTaken := lastConfirmedSwingHighPrice // Record the ERL level.
+    erlTakenBarIndex := bar_index        // Record when it was taken.
+    lastConfirmedSwingHighPrice := na   // Invalidate this specific ERL to prevent re-triggering until a new one forms.
+    if drawErlTakenLines
+        if line.exists(erlLine)
+            line.delete(erlLine) // Delete old line if exists
+        erlLine := line.new(x1=erlTakenBarIndex, y1=erlLevelTaken, x2=bar_index + 1, y2=erlLevelTaken, color=color.new(color.orange, 20), extend=extend.right, style=line.style_dashed)
+    // log.info("ERL High Taken at bar {0}: Level {1}", bar_index, erlLevelTaken)
+
+bool isErlLowTakenThisBar = false
+if not na(lastConfirmedSwingLowPrice) and close < lastConfirmedSwingLowPrice
+    // This condition means a confirmed swing low has been breached by the close.
+    isErlLowTakenThisBar := true        // Mark that it happened on this bar.
+    isErlLowTakenRecently := true       // Set state: looking for bullish FVG retest.
+    isErlHighTakenRecently := false     // Reset opposite state.
+    erlLevelTaken := lastConfirmedSwingLowPrice // Record the ERL level.
+    erlTakenBarIndex := bar_index        // Record when it was taken.
+    lastConfirmedSwingLowPrice := na    // Invalidate this specific ERL.
+    if drawErlTakenLines
+        if line.exists(erlLine)
+            line.delete(erlLine) // Delete old line if exists
+        erlLine := line.new(x1=erlTakenBarIndex, y1=erlLevelTaken, x2=bar_index + 1, y2=erlLevelTaken, color=color.new(color.blue, 20), extend=extend.right, style=line.style_dashed)
+    // log.info("ERL Low Taken at bar {0}: Level {1}", bar_index, erlLevelTaken)
+
+// Extend ERL line if it exists and no new ERL has been taken on this bar
+if drawErlTakenLines and line.exists(erlLine) and not isErlHighTakenThisBar and not isErlLowTakenThisBar
+    line.set_x2(erlLine, bar_index + 1)
+
+
+// --- MMXM Setup Logic ---
+// This section checks for the MMXM pattern:
+// 1. External Range Liquidity (ERL) is taken (a confirmed swing high/low is breached by a close).
+// 2. Price then seeks Internal Range Liquidity (IRL), specifically an FVG.
+// 3. The FVG must have formed before or at the same bar the ERL was taken.
+// 4. The FVG should be logically positioned relative to the taken ERL.
+// 5. A signal is generated when price touches the proximal line of this FVG.
+
+
+bool mmxmBuySignalAlert = false
+bool mmxmSellSignalAlert = false
+
+// MMXM Buy Setup: ERL Low Taken, then retest of a Bullish FVG
+if enableMMXMSignals and isErlLowTakenRecently and not isErlLowTakenThisBar // Ensures ERL Low was taken on a *previous* bar, and we are now looking for FVG retest.
+    for i = 0 to array.size(bullishFvgs) - 1
+        fvg = array.get(bullishFvgs, i)
+        // FVG must have formed within the lookback period from when ERL was taken.
+        // FVG must not have been previously touched/mitigated before this MMXM entry signal (as per current fvg.isMitigated logic).
+        // Price must touch the FVG (specifically, its bottom for a long entry).
+        // The FVG should ideally be below the taken ERL for a classic MMXM buy.
+        if fvg.barIndex <= erlTakenBarIndex and fvg.barIndex >= (erlTakenBarIndex - fvgLookbackForMMXM) and not fvg.isMitigated and fvg.topPrice < erlLevelTaken
+            // Check if current bar's low touches the FVG's bottom price (proximal line for buy)
+            if low <= fvg.bottomPrice and high >= fvg.bottomPrice // Current bar's range interacts with FVG's bottom.
+                plotarrow(series=low, title="MMXM Buy Signal", colorup=color.new(color.green, 0), colordown=na, location=location.belowbar, offset=0, minheight=10, maxheight=20, display=display.all - display.status_line)
+                mmxmBuySignalAlert := true
+                // log.info("MMXM Buy Signal on bar {0}: ERL Low {1} taken at {2}, Bullish FVG [{3}-{4}] from bar {5} touched at {6}.", bar_index, erlLevelTaken, erlTakenBarIndex, fvg.bottomPrice, fvg.topPrice, fvg.barIndex, fvg.bottomPrice)
+                isErlLowTakenRecently := false // Reset state to require a new ERL take for the next signal.
+                if drawErlTakenLines and line.exists(erlLine)
+                    line.set_color(erlLine, color.new(color.green, 0)) // Change line color on signal
+                    line.set_extend(erlLine, extend.none) // Stop extending
+                    erlLine := na // Clear variable so new line can be drawn
+                break // Process only one FVG touch per bar for MMXM signal.
+
+// MMXM Sell Setup: ERL High Taken, then retest of a Bearish FVG
+if enableMMXMSignals and isErlHighTakenRecently and not isErlHighTakenThisBar // Ensures ERL High was taken on a *previous* bar.
+    for i = 0 to array.size(bearishFvgs) - 1
+        fvg = array.get(bearishFvgs, i)
+        // FVG must have formed within the lookback period from when ERL was taken.
+        // FVG must not have been previously touched/mitigated before this MMXM entry signal.
+        // Price must touch the FVG (specifically, its top for a short entry).
+        // The FVG should ideally be above the taken ERL for a classic MMXM sell.
+        if fvg.barIndex <= erlTakenBarIndex and fvg.barIndex >= (erlTakenBarIndex - fvgLookbackForMMXM) and not fvg.isMitigated and fvg.bottomPrice > erlLevelTaken
+            // Check if current bar's high touches the FVG's top price (proximal line for sell)
+            if high >= fvg.topPrice and low <= fvg.topPrice // Current bar's range interacts with FVG's top.
+                plotarrow(series=high, title="MMXM Sell Signal", colorup=na, colordown=color.new(color.red, 0), location=location.abovebar, offset=0, minheight=10, maxheight=20, display=display.all - display.status_line)
+                mmxmSellSignalAlert := true
+                // log.info("MMXM Sell Signal on bar {0}: ERL High {1} taken at {2}, Bearish FVG [{3}-{4}] from bar {5} touched at {6}.", bar_index, erlLevelTaken, erlTakenBarIndex, fvg.bottomPrice, fvg.topPrice, fvg.barIndex, fvg.topPrice)
+                isErlHighTakenRecently := false // Reset state.
+                if drawErlTakenLines and line.exists(erlLine)
+                    line.set_color(erlLine, color.new(color.red, 0)) // Change line color on signal
+                    line.set_extend(erlLine, extend.none) // Stop extending
+                    erlLine := na // Clear variable so new line can be drawn
+                break
+
+// --- Alert Conditions ---
+// Note: 'erlLevelTaken' is a 'var float' and cannot be plotted directly in alert message via {{plot()}}.
+// It needs to be captured at the time of the alert.
+// However, alertcondition itself executes at the end of the bar, so mmxmBuySignalAlert being true means erlLevelTaken is set for this context.
+
+var string buyAlertMsg = ""
+if mmxmBuySignalAlert
+    buyAlertMsg := "MMXM Buy Setup: ERL Low {{ticker}} at " + str.tostring(close) + " (ERL Level: " + str.tostring(erlLevelTaken) + "), Bullish FVG Retest"
+alertcondition(condition=enableMMXMSignals and mmxmBuySignalAlert, title="MMXM Buy Signal", message=buyAlertMsg)
+
+var string sellAlertMsg = ""
+if mmxmSellSignalAlert
+    sellAlertMsg := "MMXM Sell Setup: ERL High {{ticker}} at " + str.tostring(close) + " (ERL Level: " + str.tostring(erlLevelTaken) + "), Bearish FVG Retest"
+alertcondition(condition=enableMMXMSignals and mmxmSellSignalAlert, title="MMXM Sell Signal", message=sellAlertMsg)
+
+
+// --- FVG Visualization and Mitigation Logic ---
+// This logic needs to run on every bar to draw and update FVGs
+
+// Function to draw/update FVGs
+drawFvgs(array<FvgInfo> fvgs, color fvgColor) =>
+    for i = 0 to array.size(fvgs) - 1
+        fvg = array.get(fvgs, i)
+
+        if not fvg.isMitigated
+            // Check for mitigation
+            // A FVG is mitigated if the current price touches or passes through its zone.
+            // For a bullish FVG (price expected to go up from it): mitigated if low <= fvg.topPrice
+            // For a bearish FVG (price expected to go down from it): mitigated if high >= fvg.bottomPrice
+            // More precise: if high of current bar is >= fvg.bottomPrice AND low of current bar is <= fvg.topPrice
+            bool currentBarMitigates = high >= fvg.bottomPrice and low <= fvg.topPrice
+
+            if currentBarMitigates and bar_index > fvg.barIndex // Mitigation must happen after FVG formation bar
+                fvg.isMitigated := true
+                fvg.mitigatedBarIndex := bar_index
+                // Update existing box to end at the current bar
+                if box.exists(fvg.fvgBox)
+                    box.set_right(fvg.fvgBox, bar_index)
+
+            // Draw or update the box
+            if box.exists(fvg.fvgBox)
+                // Extend the box to the current bar if not mitigated
+                if not fvg.isMitigated
+                    box.set_right(fvg.fvgBox, bar_index + 1) // Extend to the "future" by 1 bar
+            else if not fvg.isMitigated // Only draw new box if not already mitigated on formation (unlikely but good check)
+                // Draw new box, extending to current bar + 1 (to allow it to be seen on current bar)
+                // The FVG "lives" at fvg.barIndex, so the box starts there.
+                fvg.fvgBox := box.new(
+                 left = fvg.barIndex,
+                 top = fvg.topPrice,
+                 right = bar_index + 1, // Extend to next bar so it's visible and updates
+                 bottom = fvg.bottomPrice,
+                 border_color = na, // No border
+                 bgcolor = color.new(fvgColor, 80), // Semi-transparent background
+                 extend = extend.none // We manually extend or cap the right edge
+                 // text = fvg.isBullish ? "Bullish FVG" : "Bearish FVG" // Removed for cleaner look
+                )
+                array.set(fvgs, i, fvg) // Update the fvg in the array with the new box ID
+        else
+            // If mitigated and box exists, ensure its right boundary is correctly set
+            if box.exists(fvg.fvgBox)
+                box.set_right(fvg.fvgBox, fvg.mitigatedBarIndex)
+
+
+// Call drawing functions on each bar
+// Removed barstate.isrealtime or barstate.islast condition to ensure historical drawing
+drawFvgs(bullishFvgs, color.green)
+drawFvgs(bearishFvgs, color.red)
+
+// Cleanup old FVGs to prevent array from growing too large (optional, but good practice for very long running scripts)
+// For this example, we'll keep it simple and not remove them yet,
+// but in a more complex script, you might want to remove very old, mitigated FVGs.
+
+// Placeholder plot to satisfy study requirements if no other plots are present
+plot(na, title="FVG Script Active", display=display.none)
